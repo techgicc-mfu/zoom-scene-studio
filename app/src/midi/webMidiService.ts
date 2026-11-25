@@ -13,6 +13,7 @@ import {
   decompile48PatchesToRigs,
   decodePatchReadSysex,
   MIDI_PATCH_BYTES,
+  unpackRawPatch128,
 } from './zoomProtocol';
 
 export interface MidiPortLike {
@@ -529,21 +530,22 @@ export class WebMidiService {
     };
   }
 
-  private waitForZoomAck(timeoutMs: number): Promise<boolean> {
-    if (!this.zoomIn || timeoutMs <= 0) {
-      return sleep(timeoutMs).then(() => true);
+  private readCurrentPatchDump(timeoutMs: number): Promise<Uint8Array | null> {
+    if (!this.zoomOut || !this.zoomIn || timeoutMs <= 0) {
+      return Promise.resolve(null);
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        if (this.pendingZoomAckResolve) {
-          this.pendingZoomAckResolve = null;
-          resolve(false);
+        if (this.pendingZoomDumpResolve) {
+          this.pendingZoomDumpResolve = null;
+          resolve(null);
         }
       }, timeoutMs);
-      this.pendingZoomAckResolve = () => {
+      this.pendingZoomDumpResolve = (bytes) => {
         clearTimeout(timer);
-        resolve(true);
+        resolve(bytes);
       };
+      this.zoomOut!.send(buildPatchRequestSysex(this.zoomModelId));
     });
   }
 
@@ -572,8 +574,10 @@ export class WebMidiService {
 
     if (this.zoomOut) {
       let currentIdx = 0;
-      let ackedCount = 0;
-      const verifyAcks = Boolean(this.zoomIn && delayMs > 0);
+      // Legacy MS-50G / MS-70CDR (MSOG) does NOT send a 0x00 SysEx ACK after 0x32 Store;
+      // verify real hardware persistence via 0x29 read-back dump on Rig 01 and the final slot.
+      const verifyReadback = Boolean(this.zoomIn && delayMs > 0);
+      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 160) : delayMs;
       try {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
@@ -594,46 +598,52 @@ export class WebMidiService {
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
           await sleep(delayMs);
-          const ackWait = verifyAcks ? this.waitForZoomAck(1500) : Promise.resolve(true);
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
-          const acked = await ackWait;
-          if (acked) {
-            ackedCount++;
-          } else if (idx === 0) {
-            // If even the very first slot failed to ACK, fail fast instead of silently writing 47 more
-            try {
-              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-            } catch {
-              // ignore exit-editor error on hung pedal
+          await sleep(storeWaitMs);
+
+          if (verifyReadback && (idx === 0 || idx === patches48.length - 1)) {
+            const dump = await this.readCurrentPatchDump(1200);
+            if (!dump) {
+              try {
+                this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+              } catch {
+                // ignore exit-editor error on unresponsive pedal
+              }
+              const msg = `Zoom MS-50G did not reply to read-back verification after saving ${rigDisplay}. Power-cycle USB, click Scan USB, and try Sync All again.`;
+              onProgress({
+                phase: 'error',
+                current: step,
+                total: totalSteps,
+                message: msg,
+              });
+              return { ok: false, userMessage: msg };
             }
-            const msg =
-              'Zoom MS-50G did not confirm saving Rig 01 (0/48 store ACKs). Verify SCENE.ZDL is updated on the pedal and click Scan USB before syncing again.';
-            onProgress({
-              phase: 'error',
-              current: step,
-              total: totalSteps,
-              message: msg,
-            });
-            return { ok: false, userMessage: msg };
+            if (idx === 0) {
+              const readName = unpackRawPatch128(decodePatchReadSysex(dump)).name.trimEnd();
+              const expectedName = rigs[0].name.slice(0, 10).trimEnd();
+              if (expectedName && readName !== expectedName) {
+                try {
+                  this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+                } catch {
+                  // ignore
+                }
+                const msg = `Zoom MS-50G read-back mismatch on Rig 01 (got "${readName}", expected "${expectedName}"). Check USB connection and click Sync All again.`;
+                onProgress({
+                  phase: 'error',
+                  current: step,
+                  total: totalSteps,
+                  message: msg,
+                });
+                return { ok: false, userMessage: msg };
+              }
+            }
           }
-          await sleep(delayMs);
           step++;
         }
 
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
         await sleep(delayMs);
         this.zoomOut.send([0xc0, 0]);
-
-        if (verifyAcks && ackedCount < patches48.length) {
-          const msg = `Zoom MS-50G only confirmed ${ackedCount}/${patches48.length} patches. Unplug/re-scan USB and try Sync All again.`;
-          onProgress({
-            phase: 'error',
-            current: step,
-            total: totalSteps,
-            message: msg,
-          });
-          return { ok: false, userMessage: msg };
-        }
       } catch (err) {
         const failedRig =
           currentIdx < 12 ? currentIdx + 1 : Math.floor((currentIdx - 12) / 3) + 1;
