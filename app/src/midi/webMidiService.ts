@@ -117,6 +117,8 @@ export class WebMidiService {
 
     try {
       const access = await nav.requestMIDIAccess({ sysex: true });
+      if (this.zoomIn) this.zoomIn.onmidimessage = null;
+      if (this.chocolateIn) this.chocolateIn.onmidimessage = null;
       this.zoomOut = null;
       this.zoomIn = null;
       this.chocolateOut = null;
