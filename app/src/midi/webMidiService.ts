@@ -716,57 +716,63 @@ export class WebMidiService {
     if (this.chocolateOut) {
       let pktIdx = 0;
       try {
-        // Probe Chocolate Plus Switch D (addr 1344) checksum constant K via hardware 0x01 ACK before writing,
-        // so Switch D is never wiped with an unverified checksum.
-        let verifiedSwitchDK: number | undefined;
-        if (this.chocolateIn && delayMs > 0) {
-          for (const candK of SWITCH_D_CANDIDATE_KS) {
-            const acked = await new Promise<boolean>((resolve) => {
+        // Cache hardware-ACK-verified checksum constant K per 128-byte address page (addr >> 7).
+        // Switch B's Short Tap crosses 0x1FF -> 0x200 (page 3 -> page 4) and Switch D lives on pages 10..11,
+        // where K shifts per page; probing with the Chocolate Plus's native F0 00 32 01 ACK guarantees every
+        // single byte on Switches A, B, C, and D is accepted cleanly.
+        const pageKCache = new Map<number, number>();
+        const verifyChocoAcks = Boolean(this.chocolateIn && delayMs > 0);
+
+        const sendWrite21WithAck = async (addr: number, val: number): Promise<boolean> => {
+          const page = addr >>> 7;
+          const cachedK = pageKCache.get(page);
+          const trySend = (k?: number) =>
+            new Promise<boolean>((resolve) => {
               const t = setTimeout(() => {
                 if (this.pendingChocoAckResolve) {
                   this.pendingChocoAckResolve = null;
                   resolve(false);
                 }
-              }, 120);
+              }, 100);
               this.pendingChocoAckResolve = () => {
                 clearTimeout(t);
                 resolve(true);
               };
-              this.chocolateOut!.send(buildChocolateWrite21(1344, 0x04, candK));
+              this.chocolateOut!.send(buildChocolateWrite21(addr, val, k));
             });
-            if (acked) {
-              verifiedSwitchDK = candK;
-              break;
-            }
-          }
-        }
-        const liveChocoPackets =
-          verifiedSwitchDK !== undefined
-            ? buildChocolateLiveConfigPackets(1, verifiedSwitchDK)
-            : chocoPackets;
 
-        for (let i = 0; i < liveChocoPackets.length; i++) {
-          pktIdx = i;
-          // If Switch D checksum could not be hardware-verified, skip Switch D bank clear/writes to avoid wiping it
-          const pkt = liveChocoPackets[i];
-          if (this.chocolateIn && delayMs > 0 && verifiedSwitchDK === undefined) {
-            const addr =
-              pkt.length === 21 || pkt.length === 111
-                ? (pkt[9] & 0x7f) | ((pkt[10] & 0x7f) << 7) | ((pkt[11] & 0x7f) << 14)
-                : -1;
-            if (addr >= 1344 && addr < 1344 + 417) {
-              step++;
-              continue;
+          if (cachedK !== undefined) {
+            if (await trySend(cachedK)) return true;
+          } else {
+            if (await trySend(undefined)) return true;
+          }
+          for (const candK of SWITCH_D_CANDIDATE_KS) {
+            if (candK === cachedK) continue;
+            if (await trySend(candK)) {
+              pageKCache.set(page, candK);
+              return true;
             }
           }
+          return false;
+        };
+
+        for (let i = 0; i < chocoPackets.length; i++) {
+          pktIdx = i;
+          const pkt = chocoPackets[i];
           onProgress({
             phase: 'chocolate',
             current: step + 1,
             total: totalSteps,
             message: 'Configuring Chocolate Plus footswitches & Salfini VP-1 Expression port...',
           });
-          this.chocolateOut.send(pkt);
-          await sleep(delayMs);
+          if (verifyChocoAcks && pkt.length === 21 && pkt[3] === 0x09 && pkt[4] === 0x49) {
+            const addr = (pkt[9] & 0x7f) | ((pkt[10] & 0x7f) << 7) | ((pkt[11] & 0x7f) << 14);
+            const val = pkt[17] & 0x7f;
+            await sendWrite21WithAck(addr, val);
+          } else {
+            this.chocolateOut.send(pkt);
+            await sleep(delayMs);
+          }
           step++;
         }
       } catch (err) {
