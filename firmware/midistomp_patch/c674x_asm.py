@@ -57,9 +57,9 @@ def addk_s(side: int, cst16: int, dst: int, cond: int = CREG_ALWAYS) -> int:
 
 
 def mvk_l(side: int, scst5: int, dst: int, cond: int = CREG_ALWAYS) -> int:
-    """MVK .L1/.L2 scst5, dst (5-bit signed constant -16..15, src2=0)."""
-    op = 0x058 | ((side & 1) << 1)
-    return _cond(cond) | ((dst & 0x1F) << 23) | ((scst5 & 0x1F) << 13) | op
+    """MVK .L1/.L2 scst5, dst (5-bit signed constant -16..15 in bits [22:18], verified against handler.S 0x0500A358 / 0x027CA35A)."""
+    op = 0x0A358 | ((side & 1) << 1)
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((scst5 & 0x1F) << 18) | op
 
 
 def add_l(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
@@ -131,10 +131,8 @@ def mpy32_m(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = C
 
 
 def shru_s(side: int, src2: int, ucst5: int, dst: int, cond: int = CREG_ALWAYS) -> int:
-    """SHRU .S1/.S2 src2, ucst5, dst."""
-    # step.S line 39 (`shru .S2 b6, 6, b0`) -> wait step.S +0x18? Look at step.S +0x28..+0x7c!
-    # `+0x6c`: `0x01002a78` (`shru` is `0x00000222` | ...; wait handler.S +0x70 or +0xc0: `shru` immediate `.S1` op is `0x220` + `(side<<1)` with ucst5 in bits [17:13]).
-    op = 0x0220 | ((side & 1) << 1)
+    """SHRU .S1/.S2 src2, ucst5, dst (verified against step.S 0x0018C9A2 and handler.S 0x05AD69A0)."""
+    op = 0x09A0 | ((side & 1) << 1)
     return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((ucst5 & 0x1F) << 13) | op
 
 

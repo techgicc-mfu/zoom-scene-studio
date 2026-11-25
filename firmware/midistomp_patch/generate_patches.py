@@ -260,11 +260,11 @@ def _assemble_scene_engine() -> bytes:
         stw_off(0, 0, 13, 12, 2),    # state[2] = 0 (last_expr = 0)
         add_l(0, 11, 11, 10),        # a10 = 2 * r
         add_l(0, 10, 11, 10),        # a10 = 3 * r
-        add_lcst(0, 12, 10, 10),     # a10 = 12 + 3 * r (Shadow B record index)
+        add_lcst(0, 10, 12, 10),     # a10 = 3 * r + 12 (Shadow B record index; src2=a10, scst5=12)
     ])
     for s_idx in range(3):
         w.extend([
-            add_lcst(0, s_idx, 10, 4),                            # a4 = record index (12 + 3*r + s_idx)
+            add_lcst(0, 10, s_idx, 4),                            # a4 = record index (12 + 3*r + s_idx; src2=a10, scst5=s_idx)
             mvkl_s(1, ADDR_SHADOW_CACHE + s_idx * 256, 4),        # b4 = DDR shadow buf
             mvkh_s(1, ADDR_SHADOW_CACHE + s_idx * 256, 4),
         ])
