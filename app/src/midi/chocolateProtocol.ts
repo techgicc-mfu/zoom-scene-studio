@@ -44,8 +44,13 @@ export function midiCodeAddr(page: number, sw: number, bank: 0 | 1, slot: number
 /**
  * Builds a verified 21-byte M-Vave Chocolate Plus `09 49` configuration write SysEx message
  * per the OpenChocolate reverse-engineered specification.
+ * Optional `overrideK` allows hardware-ACK probing for uncaptured address families (e.g. Switch D).
  */
-export function buildChocolateWrite21(blobAddr: number, value: number): Uint8Array {
+export function buildChocolateWrite21(
+  blobAddr: number,
+  value: number,
+  overrideK?: number
+): Uint8Array {
   const a0 = blobAddr & 0x7f;
   const a1 = (blobAddr >>> 7) & 0x7f;
   const a2 = (blobAddr >>> 14) & 0x7f;
@@ -64,13 +69,70 @@ export function buildChocolateWrite21(blobAddr: number, value: number): Uint8Arr
   const S = D.reduce((acc, b) => acc + b, 0);
   const Q = D[8];
   const V = D[16];
-  const K = constantKForAddress(blobAddr);
+  const K = overrideK ?? constantKForAddress(blobAddr);
   const X = K - S - Q - V;
 
   const ck0 = X & 0x7f;
   const ck1 = (X >>> 7) & 0x7f;
 
   return new Uint8Array([0xf0, ...D, ck0, ck1, 0xf7]);
+}
+
+export const SWITCH_D_CANDIDATE_KS = [
+  0x28b, 0x08b, 0x28a, 0x18b, 0x20b, 0x30b, 0x10b, 0x38b,
+] as const;
+
+export function buildChocolateSwitchPackets(
+  sw: number,
+  midiChannel: number = 1,
+  overrideK?: number
+): Uint8Array[] {
+  const ch0 = Math.max(0, Math.min(15, midiChannel - 1));
+  const shortScenes = [0, 42, 84, 127];
+  const longHoldCcs: Array<[number, number]> = [
+    [80, 127], // Hold A: Prev Rig
+    [81, 127], // Hold B: Next Rig
+    [74, 127], // Hold C: Silent Tuner ON (slot 1 toggles OFF with 0)
+    [82, 127], // Hold D: Tap Tempo
+  ];
+  const packets: Uint8Array[] = [];
+
+  // 1. Switch step behavior = Short Tap / Long Hold (0x04)
+  packets.push(
+    buildChocolateWrite21(ADV_CUSTOM_START + sw * ADV_CUSTOM_BLOCK, STEP_MODE_SHORT_LONG, overrideK)
+  );
+
+  // 2. Wipe old Short (Bank A) & Long (Bank B) slots cleanly
+  packets.push(buildChocolateBankClear(0, sw, 0));
+  packets.push(buildChocolateBankClear(0, sw, 1));
+
+  // 3. Program Short Tap slot 0 (fields 1..4 first, enabled=1 last per OpenChocolate order)
+  const shortBase = midiCodeAddr(0, sw, 0, 0, 0);
+  packets.push(buildChocolateWrite21(shortBase + 1, ch0, overrideK));
+  packets.push(buildChocolateWrite21(shortBase + 2, ENTRY_TYPE_CC, overrideK));
+  packets.push(buildChocolateWrite21(shortBase + 3, 15, overrideK));
+  packets.push(buildChocolateWrite21(shortBase + 4, shortScenes[sw], overrideK));
+  packets.push(buildChocolateWrite21(shortBase + 0, 0x01, overrideK));
+
+  // 4. Program Long Hold slot 0 (and slot 1 = CC 74=0 on Switch C so Hold C toggles Tuner ON/OFF)
+  const longBase = midiCodeAddr(0, sw, 1, 0, 0);
+  const [holdCc, holdVal] = longHoldCcs[sw];
+  packets.push(buildChocolateWrite21(longBase + 1, ch0, overrideK));
+  packets.push(buildChocolateWrite21(longBase + 2, ENTRY_TYPE_CC, overrideK));
+  packets.push(buildChocolateWrite21(longBase + 3, holdCc, overrideK));
+  packets.push(buildChocolateWrite21(longBase + 4, holdVal, overrideK));
+  packets.push(buildChocolateWrite21(longBase + 0, 0x01, overrideK));
+
+  if (sw === 2) {
+    const longSlot1 = midiCodeAddr(0, sw, 1, 1, 0);
+    packets.push(buildChocolateWrite21(longSlot1 + 1, ch0, overrideK));
+    packets.push(buildChocolateWrite21(longSlot1 + 2, ENTRY_TYPE_CC, overrideK));
+    packets.push(buildChocolateWrite21(longSlot1 + 3, 74, overrideK));
+    packets.push(buildChocolateWrite21(longSlot1 + 4, 0, overrideK));
+    packets.push(buildChocolateWrite21(longSlot1 + 0, 0x01, overrideK));
+  }
+
+  return packets;
 }
 
 /**
@@ -99,7 +161,10 @@ export function buildChocolateBankClear(page: number, sw: number, bank: 0 | 1): 
  * - Switches A..D = 0x04 (Step short / Step long)
  * - Clears & programs Short Tap A..D (`CC 15 = 0, 42, 84, 127`) and Long Hold A..D (`CC 80=127, 81=127, 74=127, 82=127`)
  */
-export function buildChocolateLiveConfigPackets(midiChannel: number = 1): Uint8Array[] {
+export function buildChocolateLiveConfigPackets(
+  midiChannel: number = 1,
+  switchDK?: number
+): Uint8Array[] {
   const ch0 = Math.max(0, Math.min(15, midiChannel - 1));
   const packets: Uint8Array[] = [
     buildChocolateWrite21(0, 0x03),      // Mode: Advanced Custom
@@ -112,38 +177,8 @@ export function buildChocolateLiveConfigPackets(midiChannel: number = 1): Uint8A
     buildChocolateWrite21(23642, 0x00),  // Expression polarity normal
   ];
 
-  const shortScenes = [0, 42, 84, 127];
-  const longHoldCcs: Array<[number, number]> = [
-    [80, 127], // Hold A: Prev Rig
-    [81, 127], // Hold B: Next Rig
-    [74, 127], // Hold C: Silent Tuner toggle
-    [82, 127], // Hold D: Tap Tempo
-  ];
-
   for (let sw = 0; sw < 4; sw++) {
-    // 1. Switch step behavior = Short Tap / Long Hold (0x04)
-    packets.push(buildChocolateWrite21(ADV_CUSTOM_START + sw * ADV_CUSTOM_BLOCK, STEP_MODE_SHORT_LONG));
-
-    // 2. Wipe old Short (Bank A) & Long (Bank B) slots cleanly
-    packets.push(buildChocolateBankClear(0, sw, 0));
-    packets.push(buildChocolateBankClear(0, sw, 1));
-
-    // 3. Program Short Tap slot 0 (fields 1..4 first, enabled=1 last per OpenChocolate order)
-    const shortBase = midiCodeAddr(0, sw, 0, 0, 0);
-    packets.push(buildChocolateWrite21(shortBase + 1, ch0));
-    packets.push(buildChocolateWrite21(shortBase + 2, ENTRY_TYPE_CC));
-    packets.push(buildChocolateWrite21(shortBase + 3, 15));
-    packets.push(buildChocolateWrite21(shortBase + 4, shortScenes[sw]));
-    packets.push(buildChocolateWrite21(shortBase + 0, 0x01));
-
-    // 4. Program Long Hold slot 0
-    const longBase = midiCodeAddr(0, sw, 1, 0, 0);
-    const [holdCc, holdVal] = longHoldCcs[sw];
-    packets.push(buildChocolateWrite21(longBase + 1, ch0));
-    packets.push(buildChocolateWrite21(longBase + 2, ENTRY_TYPE_CC));
-    packets.push(buildChocolateWrite21(longBase + 3, holdCc));
-    packets.push(buildChocolateWrite21(longBase + 4, holdVal));
-    packets.push(buildChocolateWrite21(longBase + 0, 0x01));
+    packets.push(...buildChocolateSwitchPackets(sw, midiChannel, sw === 3 ? switchDK : undefined));
   }
 
   return packets;
@@ -192,6 +227,9 @@ export function generateChocolateFcpBlob(midiChannel: number = 1): Uint8Array {
       writeCcEntry(buf, base + BANK_A_LIST_OFF, ch0, 15, shortScenes[sw]);
       const [holdCc, holdVal] = longHoldCcs[sw];
       writeCcEntry(buf, base + BANK_B_LIST_OFF, ch0, holdCc, holdVal);
+      if (sw === 2) {
+        writeCcEntry(buf, base + BANK_B_LIST_OFF + 5, ch0, 74, 0); // Hold C toggle OFF
+      }
     }
   }
 

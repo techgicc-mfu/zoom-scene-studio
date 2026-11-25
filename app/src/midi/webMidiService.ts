@@ -3,7 +3,9 @@ import { GigRig, SceneId, SyncProgress } from '../types/rig';
 import {
   buildChocolateDiscoverySysex,
   buildChocolateLiveConfigPackets,
+  buildChocolateWrite21,
   SCENE_CC_VALUES,
+  SWITCH_D_CANDIDATE_KS,
 } from './chocolateProtocol';
 import {
   buildPatchRequestSysex,
@@ -85,6 +87,7 @@ export class WebMidiService {
   private pendingZoomDumpResolve: ((data: Uint8Array) => void) | null = null;
   private pendingZoomAckResolve: (() => void) | null = null;
   private pendingZoomIdentityResolve: (() => void) | null = null;
+  private pendingChocoAckResolve: (() => void) | null = null;
   private zoomRxCount: number = 0;
   private lastZoomRxSummary: string = 'none';
 
@@ -397,6 +400,20 @@ export class WebMidiService {
   }
 
   private handleChocolateInput(data: Uint8Array): void {
+    // M-Vave Chocolate Plus Config ACK: F0 00 32 01 ... F7
+    if (
+      data.length >= 4 &&
+      data[0] === 0xf0 &&
+      data[1] === 0x00 &&
+      data[2] === 0x32 &&
+      data[3] === 0x01 &&
+      this.pendingChocoAckResolve
+    ) {
+      const resolve = this.pendingChocoAckResolve;
+      this.pendingChocoAckResolve = null;
+      resolve();
+      return;
+    }
     // Control Change message 0xB0..0xBF: filter strictly to Expression CCs (CC 16 configured, CC 11 factory)
     if (data.length >= 3 && (data[0] & 0xf0) === 0xb0) {
       const ccNum = data[1] & 0x7f;
@@ -699,15 +716,56 @@ export class WebMidiService {
     if (this.chocolateOut) {
       let pktIdx = 0;
       try {
-        for (let i = 0; i < chocoPackets.length; i++) {
+        // Probe Chocolate Plus Switch D (addr 1344) checksum constant K via hardware 0x01 ACK before writing,
+        // so Switch D is never wiped with an unverified checksum.
+        let verifiedSwitchDK: number | undefined;
+        if (this.chocolateIn && delayMs > 0) {
+          for (const candK of SWITCH_D_CANDIDATE_KS) {
+            const acked = await new Promise<boolean>((resolve) => {
+              const t = setTimeout(() => {
+                if (this.pendingChocoAckResolve) {
+                  this.pendingChocoAckResolve = null;
+                  resolve(false);
+                }
+              }, 120);
+              this.pendingChocoAckResolve = () => {
+                clearTimeout(t);
+                resolve(true);
+              };
+              this.chocolateOut!.send(buildChocolateWrite21(1344, 0x04, candK));
+            });
+            if (acked) {
+              verifiedSwitchDK = candK;
+              break;
+            }
+          }
+        }
+        const liveChocoPackets =
+          verifiedSwitchDK !== undefined
+            ? buildChocolateLiveConfigPackets(1, verifiedSwitchDK)
+            : chocoPackets;
+
+        for (let i = 0; i < liveChocoPackets.length; i++) {
           pktIdx = i;
+          // If Switch D checksum could not be hardware-verified, skip Switch D bank clear/writes to avoid wiping it
+          const pkt = liveChocoPackets[i];
+          if (this.chocolateIn && delayMs > 0 && verifiedSwitchDK === undefined) {
+            const addr =
+              pkt.length === 21 || pkt.length === 111
+                ? (pkt[9] & 0x7f) | ((pkt[10] & 0x7f) << 7) | ((pkt[11] & 0x7f) << 14)
+                : -1;
+            if (addr >= 1344 && addr < 1344 + 417) {
+              step++;
+              continue;
+            }
+          }
           onProgress({
             phase: 'chocolate',
             current: step + 1,
             total: totalSteps,
             message: 'Configuring Chocolate Plus footswitches & Salfini VP-1 Expression port...',
           });
-          this.chocolateOut.send(chocoPackets[i]);
+          this.chocolateOut.send(pkt);
           await sleep(delayMs);
           step++;
         }
