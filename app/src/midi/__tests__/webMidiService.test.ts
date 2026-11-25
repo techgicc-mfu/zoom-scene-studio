@@ -124,7 +124,7 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(res.chocolateConnected).toBe(false);
   });
 
-  it('verifies MS-50G persistence via 0x29 read-back dump on Rig 01 and slot 48 when zoomIn is connected', async () => {
+  it('writes all 48 patches then verifies MS-50G persistence via post-0x51 0x29 read-back when zoomIn is connected', async () => {
     const sentCmds: number[] = [];
     const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
     let lastWriteDump: Uint8Array | null = null;
@@ -151,11 +151,11 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(res.ok).toBe(true);
     expect(sentCmds[0]).toBe(0x50);
     expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
-    expect(sentCmds.filter((c) => c === 0x29)).toHaveLength(2);
+    expect(sentCmds.filter((c) => c === 0x29)).toHaveLength(1);
     expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
   });
 
-  it('fails loudly instead of claiming synced when MS-50G does not reply to 0x29 read-back verification', async () => {
+  it('fails loudly instead of claiming synced when MS-50G does not reply to post-sync 0x29 read-back', async () => {
     const sentCmds: number[] = [];
     const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
     const zoomOut: any = {
@@ -172,7 +172,7 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(res.ok).toBe(false);
     expect(res.userMessage).toMatch(/read-back verification/i);
     expect(events[events.length - 1]?.phase).toBe('error');
-    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(1);
+    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
     expect(sentCmds.filter((c) => c === 0x29)).toHaveLength(1);
     expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
   });

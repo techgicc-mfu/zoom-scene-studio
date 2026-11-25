@@ -13,7 +13,6 @@ import {
   decompile48PatchesToRigs,
   decodePatchReadSysex,
   MIDI_PATCH_BYTES,
-  unpackRawPatch128,
 } from './zoomProtocol';
 
 export interface MidiPortLike {
@@ -630,69 +629,39 @@ export class WebMidiService {
             message: `Syncing ${rigDisplay} to Zoom MS-50G...`,
           });
 
-          if (idx > 0) {
-            this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
-            await sleep(delayMs);
-          }
           this.zoomOut.send([0xc0, idx]);
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
           await sleep(writeWaitMs);
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
           await sleep(storeWaitMs);
-
-          if (verifyReadback && (idx === 0 || idx === patches48.length - 1)) {
-            // Reload from flash via 0x50 + PC + 0x29 (exact sequence proven by Read from MS-50G), with retries
-            let dump: Uint8Array | null = null;
-            const maxAttempts = delayMs > 1 ? 3 : 1;
-            for (let attempt = 0; attempt < maxAttempts && !dump; attempt++) {
-              if (attempt > 0) await sleep(300);
-              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
-              await sleep(delayMs);
-              this.zoomOut.send([0xc0, idx]);
-              await sleep(delayMs);
-              dump = await this.readCurrentPatchDump(1200);
-            }
-            if (!dump) {
-              try {
-                this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-              } catch {
-                // ignore exit-editor error on unresponsive pedal
-              }
-              const msg = `Zoom MS-50G did not reply to read-back verification after saving ${rigDisplay} [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Power-cycle USB, click Scan USB, and try Sync All again.`;
-              onProgress({
-                phase: 'error',
-                current: step,
-                total: totalSteps,
-                message: msg,
-              });
-              return { ok: false, userMessage: msg };
-            }
-            if (idx === 0) {
-              const readName = unpackRawPatch128(decodePatchReadSysex(dump)).name.trimEnd();
-              const expectedName = rigs[0].name.slice(0, 10).trimEnd();
-              if (expectedName && readName !== expectedName) {
-                try {
-                  this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-                } catch {
-                  // ignore
-                }
-                const msg = `Zoom MS-50G read-back mismatch on Rig 01 (got "${readName}", expected "${expectedName}"). Check USB connection and click Sync All again.`;
-                onProgress({
-                  phase: 'error',
-                  current: step,
-                  total: totalSteps,
-                  message: msg,
-                });
-                return { ok: false, userMessage: msg };
-              }
-            }
-          }
           step++;
         }
 
+        // Exit Editor Mode (0x51) so MS-50G / MS-70CDR finishes committing flash before read-back verification
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-        await sleep(delayMs);
+        await sleep(delayMs > 1 ? 400 : delayMs);
+
+        if (verifyReadback) {
+          this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+          await sleep(delayMs);
+          this.zoomOut.send([0xc0, 0]);
+          await sleep(delayMs);
+          const dump = await this.readCurrentPatchDump(1200);
+          this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+          await sleep(delayMs);
+          if (!dump) {
+            const msg = `Zoom MS-50G did not reply to post-sync read-back verification [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Power-cycle USB, click Scan USB, and click Read from MS-50G to confirm your 48 patches.`;
+            onProgress({
+              phase: 'error',
+              current: step,
+              total: totalSteps,
+              message: msg,
+            });
+            return { ok: false, userMessage: msg };
+          }
+        }
+
         this.zoomOut.send([0xc0, 0]);
       } catch (err) {
         const failedRig =
