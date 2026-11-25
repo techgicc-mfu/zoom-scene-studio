@@ -10,7 +10,6 @@ const STEP_MODE_SHORT_LONG = 0x04;
 const ENTRY_TYPE_CC = 0x01;
 const ADV_CUSTOM_START = 93;
 const ADV_CUSTOM_BLOCK = 417;
-const ADV_CUSTOM_SWITCHES = 4;
 
 export const SCENE_CC_VALUES = {
   A: 0,
@@ -23,34 +22,21 @@ export function buildChocolateDiscoverySysex(): Uint8Array {
   return new Uint8Array([0xf0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7f, 0xf7]);
 }
 
-/**
- * Computes the empirically verified OpenChocolate checksum constant `K` for any blob address,
- * covering system settings (0..4, 23637..23642) and all bytes inside Advanced Custom switch blocks A..D.
- */
-function constantKForAddress(blobAddr: number): number {
-  const rel = blobAddr - ADV_CUSTOM_START;
-  if (rel >= 0 && rel < 8 * ADV_CUSTOM_BLOCK) {
-    const sw = Math.floor(rel / ADV_CUSTOM_BLOCK) % ADV_CUSTOM_SWITCHES;
-    return [0x28a, 0x38b, 0x18b, 0x38b][sw];
-  }
-  if (blobAddr >= 23637 && blobAddr <= 23645) return 0x20b;
-  return 0x28a;
-}
-
 export function midiCodeAddr(page: number, sw: number, bank: 0 | 1, slot: number, field: number): number {
   return ADV_CUSTOM_START + page * 1668 + sw * ADV_CUSTOM_BLOCK + 1 + bank * 80 + slot * 5 + field;
 }
 
 /**
- * Builds a verified 21-byte M-Vave Chocolate Plus `09 49` configuration write SysEx message
- * per the OpenChocolate reverse-engineered specification.
- * Optional `overrideK` allows hardware-ACK probing for uncaptured address families (e.g. Switch D).
+ * Builds a verified 21-byte M-Vave Chocolate Plus `09 49` configuration write SysEx message.
+ *
+ * The Chocolate Plus MCU checksums the DECODED 8-bit bytes of the three 4-byte 7-bit groups
+ * (`D[4..15]`) plus the value byte (`D[16]`):
+ *   `v = ((0x4A - s8) & 0xFF) << 1`
+ *   `ck0 = v & 0x7F`, `ck1 = (v >>> 7) & 0x7F`
+ * Verified bit-for-bit against all hardware-accepted writes across addresses 0, 93, 97, 178,
+ * 510, 927, 1344..1349, and 23639..23642.
  */
-export function buildChocolateWrite21(
-  blobAddr: number,
-  value: number,
-  overrideK?: number
-): Uint8Array {
+export function buildChocolateWrite21(blobAddr: number, value: number): Uint8Array {
   const a0 = blobAddr & 0x7f;
   const a1 = (blobAddr >>> 7) & 0x7f;
   const a2 = (blobAddr >>> 14) & 0x7f;
@@ -66,27 +52,50 @@ export function buildChocolateWrite21(
     val7,
   ];
 
-  const S = D.reduce((acc, b) => acc + b, 0);
-  const Q = D[8];
-  const V = D[16];
-  const K = overrideK ?? constantKForAddress(blobAddr);
-  const X = K - S - Q - V;
+  let s8 = 0;
+  for (let g = 4; g + 4 <= 16; g += 4) {
+    const w =
+      (D[g] & 0x7f) |
+      ((D[g + 1] & 0x7f) << 7) |
+      ((D[g + 2] & 0x7f) << 14) |
+      ((D[g + 3] & 0x7f) << 21);
+    s8 += (w & 0xff) + ((w >>> 8) & 0xff) + ((w >>> 16) & 0xff) + ((w >>> 24) & 0xff);
+  }
+  s8 += val7;
 
-  const ck0 = X & 0x7f;
-  const ck1 = (X >>> 7) & 0x7f;
+  const v = ((0x4a - s8) & 0xff) << 1;
+  const ck0 = v & 0x7f;
+  const ck1 = (v >>> 7) & 0x7f;
 
   return new Uint8Array([0xf0, ...D, ck0, ck1, 0xf7]);
 }
 
-export const SWITCH_D_CANDIDATE_KS = [
-  0x28b, 0x08b, 0x28a, 0x18b, 0x20b, 0x30b, 0x10b, 0x38b,
-] as const;
+function appendProgramCcSlot(
+  packets: Uint8Array[],
+  slotBase: number,
+  ch0: number,
+  cc: number,
+  val: number
+): void {
+  // CRITICAL: Chocolate Plus refuses writes into a slot whose `in_use` byte (+0) is 0.
+  // Always write `in_use = 1` FIRST, then channel, type, CC number, and CC value.
+  packets.push(buildChocolateWrite21(slotBase + 0, 0x01));
+  packets.push(buildChocolateWrite21(slotBase + 1, ch0));
+  packets.push(buildChocolateWrite21(slotBase + 2, ENTRY_TYPE_CC));
+  packets.push(buildChocolateWrite21(slotBase + 3, cc));
+  packets.push(buildChocolateWrite21(slotBase + 4, val));
+}
 
-export function buildChocolateSwitchPackets(
-  sw: number,
-  midiChannel: number = 1,
-  overrideK?: number
-): Uint8Array[] {
+function appendClearSlot(packets: Uint8Array[], slotBase: number): void {
+  // Clear fields 1..4 first, then set `in_use = 0` last so the slot ends cleanly unused.
+  packets.push(buildChocolateWrite21(slotBase + 1, 0x00));
+  packets.push(buildChocolateWrite21(slotBase + 2, 0x00));
+  packets.push(buildChocolateWrite21(slotBase + 3, 0x00));
+  packets.push(buildChocolateWrite21(slotBase + 4, 0x00));
+  packets.push(buildChocolateWrite21(slotBase + 0, 0x00));
+}
+
+export function buildChocolateSwitchPackets(sw: number, midiChannel: number = 1): Uint8Array[] {
   const ch0 = Math.max(0, Math.min(15, midiChannel - 1));
   const shortScenes = [0, 42, 84, 127];
   const longHoldCcs: Array<[number, number]> = [
@@ -98,73 +107,37 @@ export function buildChocolateSwitchPackets(
   const packets: Uint8Array[] = [];
 
   // 1. Switch step behavior = Short Tap / Long Hold (0x04)
-  packets.push(
-    buildChocolateWrite21(ADV_CUSTOM_START + sw * ADV_CUSTOM_BLOCK, STEP_MODE_SHORT_LONG, overrideK)
-  );
+  packets.push(buildChocolateWrite21(ADV_CUSTOM_START + sw * ADV_CUSTOM_BLOCK, STEP_MODE_SHORT_LONG));
 
-  // 2. Wipe old Short (Bank A) & Long (Bank B) slots cleanly
-  packets.push(buildChocolateBankClear(0, sw, 0));
-  packets.push(buildChocolateBankClear(0, sw, 1));
-
-  // 3. Program Short Tap slot 0 (fields 1..4 first, enabled=1 last per OpenChocolate order)
+  // 2. Program Short Tap slot 0 (`in_use = 1` first!) and terminate list by clearing slot 1
   const shortBase = midiCodeAddr(0, sw, 0, 0, 0);
-  packets.push(buildChocolateWrite21(shortBase + 1, ch0, overrideK));
-  packets.push(buildChocolateWrite21(shortBase + 2, ENTRY_TYPE_CC, overrideK));
-  packets.push(buildChocolateWrite21(shortBase + 3, 15, overrideK));
-  packets.push(buildChocolateWrite21(shortBase + 4, shortScenes[sw], overrideK));
-  packets.push(buildChocolateWrite21(shortBase + 0, 0x01, overrideK));
+  appendProgramCcSlot(packets, shortBase, ch0, 15, shortScenes[sw]);
+  appendClearSlot(packets, midiCodeAddr(0, sw, 0, 1, 0));
 
-  // 4. Program Long Hold slot 0 (and slot 1 = CC 74=0 on Switch C so Hold C toggles Tuner ON/OFF)
+  // 3. Program Long Hold slot 0 (and slot 1 = CC 74=0 on Switch C so Hold C toggles Tuner ON/OFF)
   const longBase = midiCodeAddr(0, sw, 1, 0, 0);
   const [holdCc, holdVal] = longHoldCcs[sw];
-  packets.push(buildChocolateWrite21(longBase + 1, ch0, overrideK));
-  packets.push(buildChocolateWrite21(longBase + 2, ENTRY_TYPE_CC, overrideK));
-  packets.push(buildChocolateWrite21(longBase + 3, holdCc, overrideK));
-  packets.push(buildChocolateWrite21(longBase + 4, holdVal, overrideK));
-  packets.push(buildChocolateWrite21(longBase + 0, 0x01, overrideK));
+  appendProgramCcSlot(packets, longBase, ch0, holdCc, holdVal);
 
   if (sw === 2) {
-    const longSlot1 = midiCodeAddr(0, sw, 1, 1, 0);
-    packets.push(buildChocolateWrite21(longSlot1 + 1, ch0, overrideK));
-    packets.push(buildChocolateWrite21(longSlot1 + 2, ENTRY_TYPE_CC, overrideK));
-    packets.push(buildChocolateWrite21(longSlot1 + 3, 74, overrideK));
-    packets.push(buildChocolateWrite21(longSlot1 + 4, 0, overrideK));
-    packets.push(buildChocolateWrite21(longSlot1 + 0, 0x01, overrideK));
+    appendProgramCcSlot(packets, midiCodeAddr(0, sw, 1, 1, 0), ch0, 74, 0);
+    appendClearSlot(packets, midiCodeAddr(0, sw, 1, 2, 0));
+  } else {
+    appendClearSlot(packets, midiCodeAddr(0, sw, 1, 1, 0));
   }
 
   return packets;
 }
 
 /**
- * Builds the captured 111-byte `09 41` bulk bank-clear SysEx frame that wipes all 16 slots
- * in a switch's Short (`bank=0`) or Long (`bank=1`) action list cleanly before writing slot 0.
- */
-export function buildChocolateBankClear(page: number, sw: number, bank: 0 | 1): Uint8Array {
-  const addr = midiCodeAddr(page, sw, bank, 0, 0);
-  const d = [
-    0x00, 0x32, 0x09, 0x41,
-    0x05, 0x00, 0x00, 0x02,
-    addr & 0x7f, (addr >>> 7) & 0x7f, (addr >>> 14) & 0x7f, 0x00,
-    0x00, 0x0a,
-    ...new Array<number>(93).fill(0),
-  ];
-  const k = 0x400 - 0x50 * bank;
-  const sum = d.reduce((acc, b) => acc + b, 0);
-  const x = (k - sum) & 0x3fff;
-  return new Uint8Array([0xf0, ...d, x & 0x7f, (x >>> 7) & 0x7f, 0xf7]);
-}
-
-/**
- * Complete USB-MIDI `09 49` + `09 41` configuration sequence configuring the Chocolate Plus for Scene Studio:
- * - Operating Mode = 0x03 (Advanced Custom), Page 0 (`usrPage=0`), `maxGroupCount=0` (1 active bank `b1`)
+ * Complete USB-MIDI `09 49` configuration sequence configuring the Chocolate Plus for Scene Studio:
+ * - Operating Mode = 0x03 (Advanced Custom)
  * - TRS Pedal Jack = 0x00 (Expression Pedal mode for Salfini VP-1) on MIDI Ch 1, CC 16 (`SCENE.ZDL` EXPR)
  * - Switches A..D = 0x04 (Step short / Step long)
- * - Clears & programs Short Tap A..D (`CC 15 = 0, 42, 84, 127`) and Long Hold A..D (`CC 80=127, 81=127, 74=127, 82=127`)
+ * - Programs Short Tap A..D (`CC 15 = 0, 42, 84, 127`) and Long Hold A..D (`CC 80=127, 81=127, 74=127/0, 82=127`)
+ * - Writes `maxGroupCount=0` (1 active bank `b1`) and `usrPage=0` last per Chocolate Plus protocol order
  */
-export function buildChocolateLiveConfigPackets(
-  midiChannel: number = 1,
-  switchDK?: number
-): Uint8Array[] {
+export function buildChocolateLiveConfigPackets(midiChannel: number = 1): Uint8Array[] {
   const ch0 = Math.max(0, Math.min(15, midiChannel - 1));
   const packets: Uint8Array[] = [
     buildChocolateWrite21(0, 0x03),      // Mode: Advanced Custom
@@ -172,14 +145,16 @@ export function buildChocolateLiveConfigPackets(
     buildChocolateWrite21(2, ch0),       // Global MIDI Channel
     buildChocolateWrite21(3, 0x01),      // Custom/Exp latch
     buildChocolateWrite21(4, 16),        // Expression CC = 16 (SCENE.ZDL EXPR)
-    buildChocolateWrite21(23639, 0x00),  // Max group count = 1 (b1 only)
-    buildChocolateWrite21(23640, 0x00),  // Advanced Custom Page 0
     buildChocolateWrite21(23642, 0x00),  // Expression polarity normal
   ];
 
   for (let sw = 0; sw < 4; sw++) {
-    packets.push(...buildChocolateSwitchPackets(sw, midiChannel, sw === 3 ? switchDK : undefined));
+    packets.push(...buildChocolateSwitchPackets(sw, midiChannel));
   }
+
+  // Write group count then current group last
+  packets.push(buildChocolateWrite21(23639, 0x00)); // Max group count = 1 (b1 only)
+  packets.push(buildChocolateWrite21(23640, 0x00)); // Advanced Custom Page 0
 
   return packets;
 }

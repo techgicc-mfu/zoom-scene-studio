@@ -3,9 +3,7 @@ import { GigRig, SceneId, SyncProgress } from '../types/rig';
 import {
   buildChocolateDiscoverySysex,
   buildChocolateLiveConfigPackets,
-  buildChocolateWrite21,
   SCENE_CC_VALUES,
-  SWITCH_D_CANDIDATE_KS,
 } from './chocolateProtocol';
 import {
   buildPatchRequestSysex,
@@ -322,7 +320,19 @@ export class WebMidiService {
         this.zoomOut.send(new Uint8Array([0xf0, 0x7e, 0x00, 0x06, 0x01, 0xf7]));
         await idPromise;
       }
+      if (this.chocolateIn) {
+        try {
+          await this.chocolateIn.open?.();
+        } catch {
+          // ignore open error if already open
+        }
+      }
       if (this.chocolateOut) {
+        try {
+          await this.chocolateOut.open?.();
+        } catch {
+          // ignore open error if already open
+        }
         this.chocolateOut.send(buildChocolateDiscoverySysex());
       }
 
@@ -716,63 +726,40 @@ export class WebMidiService {
     if (this.chocolateOut) {
       let pktIdx = 0;
       try {
-        // Cache hardware-ACK-verified checksum constant K per 128-byte address page (addr >> 7).
-        // Switch B's Short Tap crosses 0x1FF -> 0x200 (page 3 -> page 4) and Switch D lives on pages 10..11,
-        // where K shifts per page; probing with the Chocolate Plus's native F0 00 32 01 ACK guarantees every
-        // single byte on Switches A, B, C, and D is accepted cleanly.
-        const pageKCache = new Map<number, number>();
-        const verifyChocoAcks = Boolean(this.chocolateIn && delayMs > 0);
+        const waitForChocoAck = Boolean(this.chocolateIn && delayMs > 0);
+        const ackTimeoutMs = delayMs > 1 ? 150 : 25;
+        const paceMs = delayMs > 1 ? 15 : delayMs;
 
-        const sendWrite21WithAck = async (addr: number, val: number): Promise<boolean> => {
-          const page = addr >>> 7;
-          const cachedK = pageKCache.get(page);
-          const trySend = (k?: number) =>
-            new Promise<boolean>((resolve) => {
-              const t = setTimeout(() => {
-                if (this.pendingChocoAckResolve) {
-                  this.pendingChocoAckResolve = null;
-                  resolve(false);
-                }
-              }, 100);
-              this.pendingChocoAckResolve = () => {
-                clearTimeout(t);
-                resolve(true);
-              };
-              this.chocolateOut!.send(buildChocolateWrite21(addr, val, k));
-            });
-
-          if (cachedK !== undefined) {
-            if (await trySend(cachedK)) return true;
-          } else {
-            if (await trySend(undefined)) return true;
+        const sendChocoPacket = (pkt: Uint8Array): Promise<boolean> => {
+          if (!waitForChocoAck) {
+            this.chocolateOut!.send(pkt);
+            return sleep(paceMs).then(() => true);
           }
-          for (const candK of SWITCH_D_CANDIDATE_KS) {
-            if (candK === cachedK) continue;
-            if (await trySend(candK)) {
-              pageKCache.set(page, candK);
-              return true;
-            }
-          }
-          return false;
+          return new Promise<boolean>((resolve) => {
+            const t = setTimeout(() => {
+              if (this.pendingChocoAckResolve) {
+                this.pendingChocoAckResolve = null;
+                resolve(false);
+              }
+            }, ackTimeoutMs);
+            this.pendingChocoAckResolve = () => {
+              clearTimeout(t);
+              resolve(true);
+            };
+            this.chocolateOut!.send(pkt);
+          });
         };
 
         for (let i = 0; i < chocoPackets.length; i++) {
           pktIdx = i;
-          const pkt = chocoPackets[i];
           onProgress({
             phase: 'chocolate',
             current: step + 1,
             total: totalSteps,
             message: 'Configuring Chocolate Plus footswitches & Salfini VP-1 Expression port...',
           });
-          if (verifyChocoAcks && pkt.length === 21 && pkt[3] === 0x09 && pkt[4] === 0x49) {
-            const addr = (pkt[9] & 0x7f) | ((pkt[10] & 0x7f) << 7) | ((pkt[11] & 0x7f) << 14);
-            const val = pkt[17] & 0x7f;
-            await sendWrite21WithAck(addr, val);
-          } else {
-            this.chocolateOut.send(pkt);
-            await sleep(delayMs);
-          }
+          await sendChocoPacket(chocoPackets[i]);
+          if (paceMs > 0) await sleep(paceMs);
           step++;
         }
       } catch (err) {

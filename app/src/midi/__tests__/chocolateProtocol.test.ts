@@ -7,41 +7,60 @@ import {
 } from '../chocolateProtocol';
 
 describe('Chocolate Plus OpenChocolate SysEx & .fcp generator', () => {
-  it('reproduces bit-perfect captured checksums from OpenChocolate spec', () => {
+  it('reproduces bit-perfect hardware-accepted checksums across all address ranges', () => {
     const pcA = buildChocolateWrite21(0, 0x00);
     expect(Array.from(pcA)).toEqual([
       0xf0, 0x00, 0x32, 0x09, 0x49, 0x00, 0x00, 0x00, 0x02,
       0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
       0x74, 0x03, 0xf7,
     ]);
-    const adv = buildChocolateWrite21(0, 0x03);
-    expect(Array.from(adv.slice(18, 20))).toEqual([0x6e, 0x03]);
-    // Switch B Bank B / Switch C Bank A checksums must use switch family constants (0x38b / 0x18b)
-    const swBEntry = buildChocolateWrite21(510 + 1, 0x01);
-    expect(swBEntry.length).toBe(21);
-    // Switch B mode = 0x04 captured checksum from OpenChocolate: 6e 03
+    expect(Array.from(buildChocolateWrite21(0, 0x03).slice(18, 20))).toEqual([0x6e, 0x03]);
+    // Hardware-accepted writes from mvave-chocolate-tui (real Chocolate Plus):
+    expect(Array.from(buildChocolateWrite21(97, 107).slice(18, 20))).toEqual([0x5c, 0x00]);
+    expect(Array.from(buildChocolateWrite21(178, 1).slice(18, 20))).toEqual([0x0e, 0x01]);
+    expect(Array.from(buildChocolateWrite21(178, 4).slice(18, 20))).toEqual([0x08, 0x01]);
+    // Captured OpenChocolate writes on Switch B (510), Switch C (927), and polarity (23642):
     expect(Array.from(buildChocolateWrite21(510, 0x04).slice(18, 20))).toEqual([0x6e, 0x03]);
+    expect(Array.from(buildChocolateWrite21(927, 0x03).slice(18, 20))).toEqual([0x2a, 0x01]);
+    expect(Array.from(buildChocolateWrite21(23642, 0x01).slice(18, 20))).toEqual([0x06, 0x01]);
   });
 
-  it('includes USB 09 41 bank clears and 09 49 writes for all 4 switches Short (CC 15) and Long (CC 80/81/74/82)', () => {
+  it('writes in_use=1 BEFORE fields 1..4 on all 4 switches Short (CC 15) and Long (CC 80/81/74/82)', () => {
     const packets = buildChocolateLiveConfigPackets();
-    // Must send 09 41 bank clears + 09 49 writes for Switch A..D Short (CC 15 = 0,42,84,127) and Hold (80,81,74,82)
-    const hasBankClear = packets.some((p) => p.length === 111 && p[3] === 0x09 && p[4] === 0x41);
-    expect(hasBankClear).toBe(true);
+    // Every packet is a verified 21-byte 09 49 write
+    expect(packets.every((p) => p.length === 21 && p[3] === 0x09 && p[4] === 0x49)).toBe(true);
 
     const decodeWrite = (p: Uint8Array) => ({
       addr: (p[9] & 0x7f) | ((p[10] & 0x7f) << 7) | ((p[11] & 0x7f) << 14),
       val: p[17],
     });
-    const writes = packets.filter((p) => p.length === 21).map(decodeWrite);
-    // Switch D Short CC value byte (addr = 1344 + 1 + 4 = 1349, val = 127)
-    expect(writes.some((w) => w.addr === 1349 && w.val === 127)).toBe(true);
-    // Switch A Short CC number byte (addr = 93 + 1 + 3 = 97, val = 15)
-    expect(writes.some((w) => w.addr === 97 && w.val === 15)).toBe(true);
-    // Switch A Long CC 80 (addr = 93 + 0x51 + 3 = 177, val = 80)
-    expect(writes.some((w) => w.addr === 177 && w.val === 80)).toBe(true);
-    // Switch C Long CC 74 (addr = 927 + 0x51 + 3 = 1011, val = 74)
-    expect(writes.some((w) => w.addr === 1011 && w.val === 74)).toBe(true);
+    const writes = packets.map(decodeWrite);
+
+    // Switch A Short: in_use (94=1) MUST precede CC number (97=15)
+    const swAInUseIdx = writes.findIndex((w) => w.addr === 94 && w.val === 1);
+    const swACcIdx = writes.findIndex((w) => w.addr === 97 && w.val === 15);
+    expect(swAInUseIdx).toBeGreaterThan(-1);
+    expect(swAInUseIdx).toBeLessThan(swACcIdx);
+
+    // Switch B Short: in_use (511=1) MUST precede CC value (515=42)
+    const swBInUseIdx = writes.findIndex((w) => w.addr === 511 && w.val === 1);
+    const swBValIdx = writes.findIndex((w) => w.addr === 515 && w.val === 42);
+    expect(swBInUseIdx).toBeGreaterThan(-1);
+    expect(swBInUseIdx).toBeLessThan(swBValIdx);
+
+    // Switch C Long slot 0 (Tuner ON: 1011=74, 1012=127) and slot 1 (Tuner OFF: 1016=74, 1017=0)
+    const swCLong0InUse = writes.findIndex((w) => w.addr === 1008 && w.val === 1);
+    const swCLong0Cc = writes.findIndex((w) => w.addr === 1011 && w.val === 74);
+    const swCLong1InUse = writes.findIndex((w) => w.addr === 1013 && w.val === 1);
+    const swCLong1Val = writes.findIndex((w) => w.addr === 1017 && w.val === 0);
+    expect(swCLong0InUse).toBeLessThan(swCLong0Cc);
+    expect(swCLong1InUse).toBeLessThan(swCLong1Val);
+
+    // Switch D Short: in_use (1345=1) MUST precede CC value (1349=127)
+    const swDInUseIdx = writes.findIndex((w) => w.addr === 1345 && w.val === 1);
+    const swDValIdx = writes.findIndex((w) => w.addr === 1349 && w.val === 127);
+    expect(swDInUseIdx).toBeGreaterThan(-1);
+    expect(swDInUseIdx).toBeLessThan(swDValIdx);
   });
 
   it('generates a valid 23646-byte .fcp preset with Short=Scenes and Hold=Rig/Tuner/Tap', () => {
