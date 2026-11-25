@@ -61,34 +61,80 @@ def test_generated_yaml_patches_valid_and_32b_aligned(tmp_path: Path):
             assert sec["addr"] % 32 == 0
             assert len(raw) % 32 == 0  # mandatory C6000 fetch-packet padding
 
-    # Critical #1: scene-engine.yaml must hook Task_SwitchNrmlSpdRead (0xC00C6998)
-    # and embed real C6740 machine code referencing OS symbols (REC_LOAD, SEM_PEND, FX_SET_PARAM, SEM_POST, EVENT_POST)
+    # Critical #1: scene-engine.yaml must chain Task_SwitchNrmlSpdRead (0xC00C6998) after diag/midi-clock (0x12f15810)
+    # and embed real C6740 machine code referencing OS + MIDISTOMP symbols (DIAG_POLL, REC_LOAD, SEM_PEND, FX_SET_PARAM, SEM_POST, EVENT_POST)
     se_doc = docs["scene-engine.yaml"]
-    se_addrs = {w["addr"] for w in se_doc.get("write", [])}
-    assert 0xC00C6998 in se_addrs
+    se_writes = {w["addr"]: w for w in se_doc.get("write", [])}
+    assert 0xC00C6998 in se_writes
+    assert se_writes[0xC00C6998]["expect"] == "12f15810"
     se_sec = bytes.fromhex(se_doc["section"][0]["data"].replace(" ", "").replace("\n", ""))
     assert len(se_sec) >= 256  # real routine, not a 12-word stub
     se_words = {int.from_bytes(se_sec[i:i + 4], "little") for i in range(0, len(se_sec), 4)}
-    # Verify MVKL/MVKH lo16/hi16 constants for REC_LOAD (0xC00B4AAC), SEM_PEND (0xC00C7EE0), FX_SET_PARAM (0xC00BB600), EVENT_POST (0xC00CBF40)
+    # Verify MVKL/MVKH lo16/hi16 constants for DIAG_POLL (0xC00F3108), REC_LOAD (0xC00B4AAC), SEM_PEND (0xC00C7EE0), FX_SET_PARAM (0xC00BB600), EVENT_POST (0xC00CBF40)
     def has_32bit_const(words: set[int], val: int) -> bool:
         lo16 = val & 0xFFFF
         hi16 = (val >> 16) & 0xFFFF
         has_lo = any(((w >> 7) & 0xFFFF) == lo16 for w in words)
         has_hi = any(((w >> 7) & 0xFFFF) == hi16 for w in words)
         return has_lo and has_hi
+    assert has_32bit_const(se_words, 0xC00F3108)  # DIAG_POLL (chains diag -> midi-clock -> Clock_getTicks)
     assert has_32bit_const(se_words, 0xC00B4AAC)  # REC_LOAD
     assert has_32bit_const(se_words, 0xC00C7EE0)  # SEM_PEND
     assert has_32bit_const(se_words, 0xC00BB600)  # FX_SET_PARAM
     assert has_32bit_const(se_words, 0xC00D6B00)  # SEM_POST
     assert has_32bit_const(se_words, 0xC00CBF40)  # EVENT_POST
 
-    # Critical #1: no-scene-autosave.yaml must hook IS_DIRTY (0xC00ACBC4), PC call site (0xC00AEE90) to skip redundant reload when CUR_PATCH==r,
-    # and check Slot 0 fxid == SCENE_FXID (0x0195) before suppressing AUTO SAVE
+    # Critical #1: no-scene-autosave.yaml must chain IS_DIRTY (0xC00ACBC4 -> tempo-hold 0xC00D47B0),
+    # Task_MIDI PC call site (0xC00AEE90 -> midi-settings 0xC00B2D0C), and check Slot 0 fxid == 0x0195
     na_doc = docs["no-scene-autosave.yaml"]
-    na_addrs = {w["addr"] for w in na_doc.get("write", [])}
-    assert 0xC00ACBC4 in na_addrs  # IS_DIRTY hook
-    assert 0xC00AEE90 in na_addrs  # Task_MIDI PC guard hook
-    na_sec = bytes.fromhex(na_doc["section"][0]["data"].replace(" ", "").replace("\n", ""))
-    na_words = {int.from_bytes(na_sec[i:i + 4], "little") for i in range(0, len(na_sec), 4)}
-    assert has_32bit_const(na_words, 0xC00B8534)  # falls through to stock IS_DIRTY
-    assert any(((w >> 7) & 0xFFFF) == 0x0195 or ((w >> 18) & 0x1F) == 0 for w in na_words)  # checks SCENE_FXID 0x0195
+    na_writes = {w["addr"]: w for w in na_doc.get("write", [])}
+    assert 0xC00ACBC4 in na_writes and na_writes[0xC00ACBC4]["expect"] == "127e4f10"
+    assert 0xC00AEE90 in na_writes and na_writes[0xC00AEE90]["expect"] == "93d10710"
+    assert 0xC00ADF90 not in na_writes  # provided cleanly by MIDISTOMP pc-force-reload.yaml
+    na_sec0 = bytes.fromhex(na_doc["section"][0]["data"].replace(" ", "").replace("\n", ""))
+    na_words0 = {int.from_bytes(na_sec0[i:i + 4], "little") for i in range(0, len(na_sec0), 4)}
+    na_sec1 = bytes.fromhex(na_doc["section"][1]["data"].replace(" ", "").replace("\n", ""))
+    na_words1 = {int.from_bytes(na_sec1[i:i + 4], "little") for i in range(0, len(na_sec1), 4)}
+    assert has_32bit_const(na_words0, 0xC00D47B0)  # chains to tempo-hold dirty_trampoline -> IS_DIRTY
+    assert has_32bit_const(na_words1, 0xC00B2D0C)  # chains to midi-settings gate_trampoline -> STOCK_MSG
+    assert has_32bit_const(na_words1, 0x1181EA00)  # reads MIDI_FLAGS for PROG CH START NO. 0/1
+    assert any(((w >> 7) & 0xFFFF) == 0x0195 for w in na_words0)  # checks SCENE_FXID 0x0195
+
+
+def test_patch_sections_have_zero_self_or_midistomp_overlap(tmp_path: Path):
+    """Ensures all 3 generated Scene patches have zero DDR overlap with each other or MIDISTOMP V2.0."""
+    paths = generate_all_patches(tmp_path)
+    midistomp_ddr_ranges = [
+        (0x1181E040, 0x11820000),  # midi-clock, midi-settings, tempo-hold in L2
+        (0xC00F2000, 0xC010FF60),  # version-2.0, midi-cc, scroll, looper, fx-category, diag, mixer-m2
+    ]
+    seen_ranges: list[tuple[str, int, int]] = []
+    for p in paths:
+        doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+        for sec in doc.get("section", []):
+            start = sec["addr"]
+            end = start + len(bytes.fromhex(sec["data"].replace(" ", "").replace("\n", "")))
+            assert start >= 0xC0110000 and end <= 0xC0120000, f"{p.name} section {hex(start)}..{hex(end)} out of reserved 0xC0110000..0xC011FFFF band"
+            for ms_start, ms_end in midistomp_ddr_ranges:
+                assert end <= ms_start or start >= ms_end, f"{p.name} overlaps MIDISTOMP range {hex(ms_start)}..{hex(ms_end)}"
+            for prev_name, prev_start, prev_end in seen_ranges:
+                assert end <= prev_start or start >= prev_end, f"{p.name} overlaps {prev_name} ({hex(prev_start)}..{hex(prev_end)})"
+            seen_ranges.append((p.name, start, end))
+
+    # Verify branch targets in autosave_guard and pc_guard land squarely on valid mvkl instructions
+    na_doc = yaml.safe_load((tmp_path / "no-scene-autosave.yaml").read_text(encoding="utf-8"))
+    for sec in na_doc["section"]:
+        addr = sec["addr"]
+        raw = bytes.fromhex(sec["data"])
+        words = [int.from_bytes(raw[i:i + 4], "little") for i in range(0, len(raw), 4)]
+        for i, word in enumerate(words):
+            if (word & 0x7F) in (0x10, 0x12) and ((word >> 2) & 0x1F) == 0x4:  # b_disp .S1/.S2 (op 0x10/0x12, non-callp)
+                disp = (word >> 7) & 0x1FFFFF
+                if disp & 0x100000:
+                    disp -= 0x200000
+                pkt_base = (addr + i * 4) & ~31
+                target = pkt_base + (disp << 2)
+                t_idx = (target - addr) // 4
+                assert 0 <= t_idx < len(words)
+                # Must land on mvkl .S2 (op 0x2A), never skip into mvkh (0x6A) or NOP padding!
+                assert (words[t_idx] & 0x7F) == 0x2A, f"Branch in {hex(addr)}+{hex(i*4)} landed on 0x{words[t_idx]:08x} instead of mvkl"

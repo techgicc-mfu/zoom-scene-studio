@@ -29,6 +29,6 @@ Write-Host "`n=== [3/3] Firmware Artifacts Ready ===" -ForegroundColor Green
 Write-Host "  - Effect Module : $RepoRoot\dist\SCENE.ZDL"
 Write-Host "  - OS Patches    : $RepoRoot\dist\patches\rig-wrap-12.yaml, no-scene-autosave.yaml, scene-engine.yaml"
 Write-Host "`nNext One-Time Hardware Step:"
-Write-Host "  1. Build your MIDISTOMP V2.0 updater with zoomms including dist\patches\*.yaml (or run MIDISTOMP-builder)."
+Write-Host "  1. Double-click Build-Scene-Updater.bat (or drag 'ZOOM MS-70CDR v2.10 Updater.exe' onto it) to build dist\MIDISTOMP-V2.0-Scene-Studio-Updater.exe."
 Write-Host "  2. Hold UP + DOWN on your MS-50G while plugging in USB to flash the OS once."
 Write-Host "  3. Inject dist\SCENE.ZDL via Zoom Effect Manager, then launch Start-Scene-Studio.bat!"

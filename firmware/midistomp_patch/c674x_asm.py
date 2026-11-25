@@ -110,6 +110,12 @@ def mv_l(side: int, src2: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) ->
     return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((x & 1) << 12) | (0x058 | ((side & 1) << 1))
 
 
+def and_l(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """AND .L1/.L2 src1, src2, dst (verified against MIDISTOMP midi_gate 0x009C2F78)."""
+    op = 0x0F78 | ((x & 1) << 12) | ((side & 1) << 1)
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op
+
+
 def mpy32_m(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
     """MPY32 .M1/.M2 src1, src2, dst (signed 32x32->32)."""
     # handler.S +0xb8? Wait +0xc0 / +0xd0: mpy32 is op 0x00000230?
