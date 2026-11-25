@@ -489,6 +489,9 @@ export class WebMidiService {
     }
 
     const raw48: Uint8Array[] = [];
+    this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+    await sleep(delayMs > 0 ? Math.max(delayMs, 80) : 0);
+
     for (let idx = 0; idx < 48; idx++) {
       const rigLabel =
         idx < 12
@@ -541,9 +544,11 @@ export class WebMidiService {
     }
 
     try {
+      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      await sleep(delayMs);
       this.zoomOut.send([0xc0, 0]);
     } catch {
-      // Ignore post-read PC return failure
+      // Ignore post-read exit-editor / PC return failure
     }
 
     const rigs = decompile48PatchesToRigs(raw48);
