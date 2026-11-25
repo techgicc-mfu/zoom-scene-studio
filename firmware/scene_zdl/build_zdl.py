@@ -123,80 +123,43 @@ def _encode_zoom_screen_rle(title: str) -> bytes:
 
 
 def build_preassembled_audio_code(trim_lut_va: int = 0x800000BC) -> tuple[bytes, list[tuple[int, int, int]]]:
-    """Assembles real relocatable C674x machine code for Fx_FLT_SCENE(unsigned int *ctx).
+    """Assembles branchless, zero-relocation C674x machine code for Fx_FLT_SCENE(unsigned int *ctx).
 
     1. Executes mandatory ctx[11]/ctx[12] magic pointer shuttle: *magicDst = *magicSrc.
-    2. Reads TRIM index from ACTIVE_PATCH_SLOT0_TRIM_ADDR (0xC009BF68), clamps unsigned > 24 -> 12.
-    3. Loads float gain from relocated .const TRIM_LUT[trimIdx] (RT_ABS_L16 / RT_ABS_H16).
-    4. Runs 8-sample stereo pass-through + gain accumulation:
-         outBuf[s] += fxBuf[s] * gain; outBuf[s+8] += fxBuf[s+8] * gain;
-    5. Returns cleanly to DSP host via B .S2 B3; NOP 5.
+    2. Runs unrolled 16-sample (8 L + 8 R) stereo unity pass-through accumulation:
+         outBuf[s] += fxBuf[s]  for s = 0..15
+       Uses only 4 hardware-verified side-A opcodes (LDW .D1T1, STW .D1T1, ADDSP .L1, NOP, B .S2 B3)
+       with zero branches and zero .audio relocations so .const/.dynsym match reference ZoomMultistompZDL layout.
+    3. Returns cleanly to DSP host via B .S2 B3; NOP 5.
     """
-    base_va = 0x00000000
+    _ = trim_lut_va
     w: list[int] = [
-        # Fetch packet 0 (0x00..0x1F): Magic pointer shuttle & buffer pointers
-        ldw_off(0, 1, 4, 12, 5),     # +0x00: b5 = ctx[12] (magicSrc)
-        ldw_off(0, 0, 4, 11, 3),     # +0x04: a3 = ctx[11] (&magicDst)
-        ldw_off(0, 0, 4, 5, 5),      # +0x08: a5 = ctx[5]  (fxBuf)
-        ldw_off(0, 0, 4, 6, 6),      # +0x0C: a6 = ctx[6]  (outBuf)
-        nop(4),                      # +0x10
-        ldw_off(1, 1, 5, 0, 4),      # +0x14: b4 = *magicSrc
-        ldw_off(0, 0, 3, 0, 3),      # +0x18: a3 = magicDst
-        nop(4),                      # +0x1C
-
-        # Fetch packet 1 (0x20..0x3F): Store magic, load TRIM index + relocated TRIM_LUT base into A1
-        stw_off(0, 1, 4, 3, 0),                      # +0x20: *magicDst = *magicSrc
-        mvkl_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x24: a7 = &ACTIVE_PATCH_SLOT0_TRIM
-        mvkh_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x28
-        ldw_off(0, 0, 7, 0, 7),                      # +0x2C: a7 = trimIdx [ready after 4 cycles]
+        # Magic pointer shuttle & buffer pointers (all side-A .D1T1, zero cross-path)
+        ldw_off(0, 0, 4, 12, 7),     # a7 = ctx[12] (magicSrc)
+        ldw_off(0, 0, 4, 11, 3),     # a3 = ctx[11] (&magicDst)
+        ldw_off(0, 0, 4, 5, 5),      # a5 = ctx[5]  (fxBuf)
+        ldw_off(0, 0, 4, 6, 6),      # a6 = ctx[6]  (outBuf)
+        nop(4),
+        ldw_off(0, 0, 7, 0, 7),      # a7 = *magicSrc
+        ldw_off(0, 0, 3, 0, 3),      # a3 = magicDst
+        nop(4),
+        stw_off(0, 0, 7, 3, 0),      # *magicDst = *magicSrc
     ]
-    lut_l16_off = len(w) * 4
-    w.append(mvkl_s(0, trim_lut_va, 1))              # +0x30: a1 = lo16(TRIM_LUT) (reloc RT_ABS_L16)
-    lut_h16_off = len(w) * 4
+    # Unrolled 16-sample stereo unity pass-through (L: 0..7, R: 8..15)
+    for s in range(16):
+        w.extend([
+            ldw_off(0, 0, 5, s, 1),  # a1 = fxBuf[s]  (4 delay slots)
+            ldw_off(0, 0, 6, s, 2),  # a2 = outBuf[s] (4 delay slots)
+            nop(4),
+            addsp_l1(2, 1, 2),       # a2 = outBuf[s] + fxBuf[s] (3 delay slots)
+            nop(3),
+            stw_off(0, 0, 2, 6, s),  # outBuf[s] = a2
+        ])
     w.extend([
-        mvkh_s(0, trim_lut_va, 1),                   # +0x34: a1 |= hi16(TRIM_LUT) (reloc RT_ABS_H16)
-        mvk_s(0, 24, 9),                             # +0x38: a9 = 24
-        nop(2),                                      # +0x3C: total 5 cycles after ldw +0x2C -> a7 ready
-
-        # Fetch packet 2 (0x40..0x5F): Unsigned clamp trimIdx > 24 -> 12, load TRIM_LUT[trimIdx] into A8
-        cmpgtu_l(0, 9, 7, 0),                        # +0x40: a0 = (trimIdx > 24)
-        mvk_s(0, 12, 7, cond=CREG_A0),               # +0x44: if out of range, trimIdx = 12 (unity)
-        add_l(0, 7, 7, 7),                           # +0x48: a7 = 2 * trimIdx
-        add_l(0, 7, 7, 7),                           # +0x4C: a7 = 4 * trimIdx
-        add_l(0, 1, 7, 1),                           # +0x50: a1 = TRIM_LUT + 4 * trimIdx
-        ldw_off(0, 0, 1, 0, 8),                      # +0x54: a8 = TRIM_LUT[trimIdx] [ready after 4]
-        mvk_s(0, 8, 9),                              # +0x58: loop s = 8 samples (L + R)
-        nop(3),                                      # +0x5C: wait 4 cycles total before reading a8
-
-        # Fetch packet 3 (0x60..0x7F): Stereo sample loop (L at *+a5(0), R at *+a5(8 words = 32B))
-        ldw_off(0, 0, 5, 0, 1),                      # +0x60: a1 = fxBuf[s] (L)
-        ldw_off(0, 0, 6, 0, 2),                      # +0x64: a2 = outBuf[s] (L)
-        ldw_off(0, 0, 5, 8, 3),                      # +0x68: a3 = fxBuf[s+8] (R)
-        ldw_off(0, 0, 6, 8, 4),                      # +0x6C: a4 = outBuf[s+8] (R)
-        nop(4),                                      # +0x70
-        mpysp_m1(1, 8, 1),                           # +0x74: a1 = fxBuf[s] * g
-        mpysp_m1(3, 8, 3),                           # +0x78: a3 = fxBuf[s+8] * g
-        nop(3),                                      # +0x7C
-
-        # Fetch packet 4 (0x80..0x9F): Accumulate outBuf + store + advance + branch back
-        addsp_l1(2, 1, 2),                           # +0x80: a2 = outBuf[s] + fxBuf[s]*g
-        addsp_l1(4, 3, 4),                           # +0x84: a4 = outBuf[s+8] + fxBuf[s+8]*g
-        nop(3),                                      # +0x88
-        stw_off(0, 0, 2, 6, 0),                      # +0x8C: outBuf[s] = a2
-        stw_off(0, 0, 4, 6, 8),                      # +0x90: outBuf[s+8] = a4
-        add_lcst(0, 5, 4, 5),                        # +0x94: fxBuf += 4 (src2=a5, scst5=+4, dst=a5)
-        add_lcst(0, 6, 4, 6),                        # +0x98: outBuf += 4 (src2=a6, scst5=+4, dst=a6)
-        add_lcst(0, 9, -1, 0),                       # +0x9C: a0 = loop - 1 (src2=a9, scst5=-1, dst=a0)
-
-        # Fetch packet 5 (0xA0..0xBF): Loop check + epilogue return
-        mv_l(0, 0, 9),                               # +0xA0: loop = a0
-        b_disp(base_va + 0x60, base_va + 0xA0, side=0, cond=CREG_A0),  # +0xA4: [a0] b loop
-        nop(5),                                      # +0xA8
-        b_reg_s2(3),                                 # +0xAC: b .S2 b3
-        nop(5),                                      # +0xB0
+        b_reg_s2(3),                 # b .S2 b3
+        nop(5),
     ])
-    relocs = [(lut_l16_off, 9, trim_lut_va), (lut_h16_off, 10, trim_lut_va)]
-    return pack_words_padded32(w), relocs
+    return pack_words_padded32(w), []
 
 
 PREASSEMBLED_C6740_AUDIO_STUB, _ = build_preassembled_audio_code()
@@ -345,6 +308,7 @@ def _build_c6000_elf_payload(
     icon_bmp: bytes,
     pic_rle: bytes,
     lut_off: int,
+    include_trim_lut: bool = True,
 ) -> bytes:
     """Builds a ZoomMultistompZDL-compliant TI C674x EABI ET_DYN ELF shared object."""
     effect_name = manifest["effect_name"].upper()[:8]
@@ -375,8 +339,9 @@ def _build_c6000_elf_payload(
     const_buf = bytearray(pic_rle)
 
     # Embed TRIM_LUT at exact lut_va + extra .const + 68B _Fx_FLT_<Name>_Coe
-    const_buf.extend(b"\x00" * (lut_off - len(const_buf)))
-    const_buf.extend(b"".join(struct.pack("<f", v) for v in TRIM_LUT))
+    if include_trim_lut:
+        const_buf.extend(b"\x00" * (lut_off - len(const_buf)))
+        const_buf.extend(b"".join(struct.pack("<f", v) for v in TRIM_LUT))
     const_buf.extend(extra_const)
     _ = icon_bmp
 
@@ -523,7 +488,8 @@ def _build_c6000_elf_payload(
     add_sym(f"_Fx_FLT_{effect_name}_Coe", coe_va, 0x44, 1, 0, 2)
     add_sym("_infoEffectTypeKnob_A_2", knob_info_va, len(fardata), 1, 0, 2)
     add_sym(f"picEffectType_{effect_name}", CONST_VA, len(pic_rle), 1, 0, 2)
-    add_sym("TRIM_LUT", lut_va, len(TRIM_LUT) * 4, 1, 0, 2)
+    if include_trim_lut:
+        add_sym("TRIM_LUT", lut_va, len(TRIM_LUT) * 4, 1, 0, 2)
     for i in reversed(range(len(params))):
         pname = params[i]["name"].replace(" ", "")
         add_sym(f"Fx_FLT_{effect_name}_{pname}_edit", TEXT_VA + knob_offs[i], 0, 2, 0, 2)
@@ -671,7 +637,11 @@ def _build_c6000_elf_payload(
     return bytes(elf)
 
 
-def build_scene_zdl(out_path: Path, cl6x_path: Path | None = None) -> bytes:
+def build_scene_zdl(
+    out_path: Path,
+    cl6x_path: Path | None = None,
+    audio_nop: bool = False,
+) -> bytes:
     """Packages the authentic 0x4C Zoom SIZE/INFO header + C674x EABI ELF into SCENE.ZDL."""
     manifest_path = Path(__file__).resolve().parent / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -681,9 +651,21 @@ def build_scene_zdl(out_path: Path, cl6x_path: Path | None = None) -> bytes:
     pic_rle = _encode_zoom_screen_rle(effect_name)
     lut_off = _align_up(len(pic_rle), 4)
     lut_va = 0x80000000 + lut_off
-    audio_bytes, extra_const, audio_relocs = _compile_or_fallback_audio(cl6x_path, out_path.parent, lut_va)
+    if audio_nop:
+        audio_bytes, extra_const, audio_relocs = _NOP_RETURN, b"", []
+    else:
+        audio_bytes, extra_const, audio_relocs = _compile_or_fallback_audio(cl6x_path, out_path.parent, lut_va)
     icon_bmp = build_scene_icon_bmp()
-    elf_blob = _build_c6000_elf_payload(manifest, audio_bytes, audio_relocs, extra_const, icon_bmp, pic_rle, lut_off)
+    elf_blob = _build_c6000_elf_payload(
+        manifest,
+        audio_bytes,
+        audio_relocs,
+        extra_const,
+        icon_bmp,
+        pic_rle,
+        lut_off,
+        include_trim_lut=bool(audio_relocs),
+    )
 
     # Authentic 76-byte (0x4C) Zoom ZDL outer header (ZoomMultistompZDL zdl.py / linker.py)
     hdr = bytearray(0x4C)
@@ -709,7 +691,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Build SCENE.ZDL")
     parser.add_argument("--cl6x", type=Path, default=None, help="Optional path to TI cl6x compiler")
+    parser.add_argument("--audio-nop", action="store_true", help="Emit NOP_RETURN audio stub (UI/loader smoke test)")
     args = parser.parse_args()
     default_out = Path(__file__).resolve().parent.parent.parent / "dist" / "SCENE.ZDL"
-    blob = build_scene_zdl(default_out, cl6x_path=args.cl6x)
-    print(f"Built {default_out} ({len(blob)} bytes, fxid=0x{SCENE_FXID:04X})")
+    blob = build_scene_zdl(default_out, cl6x_path=args.cl6x, audio_nop=args.audio_nop)
+    mode = "audio-nop smoke" if args.audio_nop else "full DSP"
+    print(f"Built {default_out} ({len(blob)} bytes, fxid=0x{SCENE_FXID:04X}, {mode})")
