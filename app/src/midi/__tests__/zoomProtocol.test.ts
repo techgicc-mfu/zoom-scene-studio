@@ -40,6 +40,8 @@ describe('Zoom MS-50G authentic 122B <-> 146B MSOG bitpacker & 48-patch shadow c
     expect(parsed.name).toBe('ROCK PLEXI');
     expect(parsed.tempo).toBe(123);
     expect(parsed.slots6[1].fxid).toBe(0x040000f0);
+    expect(raw[1 * 18 + 15]).toBe(0x40); // G-AMP CAB enable byte set for MS 1959
+    expect(parsed.slots6[1].params[7]).toBe(240);
     expect(parsed.slots6[2].enabled).toBe(false);
     expect(parsed.slots6[2].params[0]).toBe(559);
   });

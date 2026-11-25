@@ -32,7 +32,7 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
       const sceneA: PedalChain5 = [
         slot(false, 0x02000070, [6, 8, 12, 100, 100]),          // Cry Wah (OFF on rhythm)
         slot(false, 0x03000170, [45, 57, 82]),                  // TS Drive (OFF on cleanish A)
-        slot(true, 0x040000f0, [30, 58, 95, 58, 60, 48, 50]),   // MS 1959 Plexi (rolled-back clean)
+        slot(true, 0x040000f0, [30, 58, 95, 58, 60, 48, 50, 1, 0]),   // MS 1959 Plexi (CAB ON, LINE)
         slot(false, 0x08000030, [360, 28, 24, 8, 0, 100, 0]),   // AnalogDly
         slot(true, 0x09000090, [8, 28, 20, 58, 97, 95, 0, 100]),// Studio Plate Reverb
       ];
@@ -86,7 +86,7 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
       const sceneA: PedalChain5 = [
         slot(true, 0x01000008, [5, 6, 100, 0]),                 // Comp
         slot(false, 0x03000170, [45, 54, 86]),                  // TS Drive
-        slot(true, 0x04000010, [34, 55, 96, 56, 52, 48, 50]),   // Deluxe-R Clean
+        slot(true, 0x04000010, [34, 55, 96, 56, 52, 48, 50, 1, 0]),   // Deluxe-R Clean (CAB ON, LINE)
         slot(false, 0x06000008, [65, 33, 125, 21]),             // Vintage Tremolo
         slot(true, 0x090000c0, [28, 32, 58, 100]),              // 63 Spring Reverb
       ];
@@ -139,7 +139,7 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
       const sceneA: PedalChain5 = [
         slot(true, 0x01000010, [34, 4, 105, 6]),                // Rack Comp
         slot(false, 0x03000150, [42, 58, 70]),                  // CentaGold
-        slot(true, 0x04000008, [26, 50, 96, 62, 50, 50, 52]),   // FD Combo sparkling clean
+        slot(true, 0x04000008, [26, 50, 96, 62, 50, 50, 52, 1, 0]),   // FD Combo sparkling clean (CAB ON, LINE)
         slot(false, 0x060000a0, [54, 22, 50, 7, 100]),          // Stereo Chorus
         slot(true, 0x08000010, [380, 26, 22, 6, 100, 0]),       // Subtle Tape Echo
       ];
@@ -190,7 +190,7 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
       const sceneA: PedalChain5 = [
         slot(true, 0x01000010, [32, 4, 104, 5]),                // Rack Comp
         slot(false, 0x030001d0, [62, 65, 38]),                  // SweetDrv
-        slot(true, 0x04000040, [34, 55, 95, 60, 50, 48, 53]),   // VX Combo (AC30 Chime)
+        slot(true, 0x04000040, [34, 55, 95, 60, 50, 48, 53, 1, 0]),   // VX Combo (AC30 Chime, CAB ON, LINE)
         slot(true, 0x08000020, [375, 30, 22, 22, 100, 0]),      // Mod Delay (constant 375ms time!)
         slot(true, 0x09000008, [65, 42, 26, 32, 70, 0]),        // HD Hall Reverb
       ];

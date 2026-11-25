@@ -118,12 +118,27 @@ export function packRawPatch128(
       setBitsFromNumber(rev, bitpos - 12, bitpos, val);
       bitpos -= 13;
     }
-    for (let p = 3; p < 8; p++) {
+    for (let p = 3; p < 7; p++) {
       const val = Math.max(0, Math.min(255, Math.trunc(slot.params[p] ?? 0)));
       setBitsFromNumber(rev, bitpos - 7, bitpos, val);
       bitpos -= 8;
     }
-    bitpos -= 20;
+    // P7 (bits 43..35 = 9 bits): for Guitar Amps (gid 0x04), P7 is the CAB model ID (1 -> matching amp cab, 0 -> OFF)
+    // and raw[15] (rev[2]) carries the mandatory 0x40 G-AMP CAB enable byte when CAB is ON.
+    const isGuitarAmp = ((slot.fxid >>> 24) & 0x0f) === 0x04;
+    const rawP7 = Math.trunc(slot.params[7] ?? 0);
+    const p7Val = isGuitarAmp
+      ? rawP7 === 0
+        ? 0
+        : rawP7 === 1
+          ? slot.fxid & 0x1ff
+          : Math.max(0, Math.min(511, rawP7))
+      : Math.max(0, Math.min(255, rawP7));
+    setBitsFromNumber(rev, bitpos - 8, bitpos, p7Val);
+    bitpos -= 28;
+    if (isGuitarAmp && p7Val > 0) {
+      rev[2] = 0x40;
+    }
     const p8 = Math.max(0, Math.min(255, Math.trunc(slot.params[8] ?? 0)));
     setBitsFromNumber(rev, bitpos - 7, bitpos, p8);
 
@@ -173,11 +188,14 @@ export function unpackRawPatch128(raw122: Uint8Array): {
       params.push(getNumberFromBits(rev, bitpos - 12, bitpos));
       bitpos -= 13;
     }
-    for (let p = 3; p < 8; p++) {
+    for (let p = 3; p < 7; p++) {
       params.push(getNumberFromBits(rev, bitpos - 7, bitpos));
       bitpos -= 8;
     }
-    bitpos -= 20;
+    const isGuitarAmp = ((fxid >>> 24) & 0x0f) === 0x04;
+    const p7Raw = getNumberFromBits(rev, bitpos - 8, bitpos);
+    params.push(isGuitarAmp && rev[2] === 0 ? 0 : p7Raw);
+    bitpos -= 28;
     params.push(getNumberFromBits(rev, bitpos - 7, bitpos));
     slots6.push({ enabled, fxid, params });
   }

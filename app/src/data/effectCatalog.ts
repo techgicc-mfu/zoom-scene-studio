@@ -320,6 +320,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 45 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 44 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 52 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -336,6 +338,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 50 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 50 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -352,6 +356,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 49 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 53 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -368,6 +374,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 46 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 45 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 53 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -384,6 +392,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 50 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 50 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -400,6 +410,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 53 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 54 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -416,6 +428,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 48 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 58 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -432,6 +446,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 52 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 51 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
   {
@@ -448,6 +464,8 @@ export const EFFECT_CATALOG: EffectDefinition[] = [
       { name: 'Middle', min: 0, max: 100, defaultValue: 50 },
       { name: 'Bass', min: 0, max: 100, defaultValue: 51 },
       { name: 'Pres', min: 0, max: 100, defaultValue: 50 },
+      { name: 'CAB', min: 0, max: 1, defaultValue: 1 },
+      { name: 'OUT', min: 0, max: 4, defaultValue: 0 },
     ],
   },
 
