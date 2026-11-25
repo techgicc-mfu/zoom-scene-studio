@@ -60,14 +60,14 @@ OS_EVENT_POST = 0xC00CBF40
 B14_CUR_PATCH_W = 324 // 4
 B14_SEM_HANDLE_W = 764 // 4
 B14_UI_EVENT_W = 656 // 4
-SCENE_FXID = 0x0195
+SCENE_FXID = 0x02000195  # 28-bit MSOG live patch slot ID (Filter gid=0x02 | fxid=0x0195)
 
 # Free DDR Region 1 above MIDISTOMP V2.0 (mixer-m2 ends @ 0xC010FF60; verified free to 0xC0197FFF)
 ADDR_AUTOSAVE_GUARD = 0xC0110000
 ADDR_PC_GUARD = 0xC0110100
 ADDR_SCENE_ENGINE = 0xC0110200
 ADDR_SCENE_STATE = 0xC0120000   # [0]=last_rig, [4]=last_scene, [8]=last_expr
-ADDR_SHADOW_CACHE = 0xC0120100  # 3 * 256B shadow flash record buffers
+ADDR_SHADOW_CACHE = 0xC0120100  # 4 * 256B cached flash record buffers (Scene A, B, C, D)
 
 
 def _pad_words_to_pkt(words: list[int]) -> None:
@@ -252,31 +252,38 @@ def _assemble_scene_engine() -> bytes:
     skip_rec_load_idx = len(w)
     w.extend([nop(1), nop(5)])       # placeholder: [!a1] skip to scene check
 
-    # Rig changed -> store new last_rig, reset last_scene=0 and last_expr=0, pre-load 3 Shadow Records via REC_LOAD
+    # Rig changed -> store new last_rig, reset last_scene=0 and last_expr=0, pre-load Scene A + 3 Shadow Records via REC_LOAD
     w.extend([
         stw_off(0, 0, 11, 12, 0),    # state[0] = CUR_PATCH
         mvk_s(0, 0, 13),
         stw_off(0, 0, 13, 12, 1),    # state[1] = 0 (last_scene = Scene A)
         stw_off(0, 0, 13, 12, 2),    # state[2] = 0 (last_expr = 0)
+        # Cache Scene A (CUR_PATCH = a11) into ADDR_SHADOW_CACHE + 0*256
+        mv_l(0, 11, 4),              # a4 = CUR_PATCH (Scene A)
+        mvkl_s(1, ADDR_SHADOW_CACHE, 4),
+        mvkh_s(1, ADDR_SHADOW_CACHE, 4),
+    ])
+    farcall(OS_REC_LOAD, cur_va() + 24, w)
+    w.extend([
         add_l(0, 11, 11, 10),        # a10 = 2 * r
         add_l(0, 10, 11, 10),        # a10 = 3 * r
         add_lcst(0, 10, 12, 10),     # a10 = 3 * r + 12 (Shadow B record index; src2=a10, scst5=12)
     ])
     for s_idx in range(3):
         w.extend([
-            add_lcst(0, 10, s_idx, 4),                            # a4 = record index (12 + 3*r + s_idx; src2=a10, scst5=s_idx)
-            mvkl_s(1, ADDR_SHADOW_CACHE + s_idx * 256, 4),        # b4 = DDR shadow buf
-            mvkh_s(1, ADDR_SHADOW_CACHE + s_idx * 256, 4),
+            add_lcst(0, 10, s_idx, 4),                            # a4 = record index (12 + 3*r + s_idx)
+            mvkl_s(1, ADDR_SHADOW_CACHE + (s_idx + 1) * 256, 4),  # b4 = DDR cache[1..3] (Scene B, C, D)
+            mvkh_s(1, ADDR_SHADOW_CACHE + (s_idx + 1) * 256, 4),
         ])
         farcall(OS_REC_LOAD, cur_va() + 24, w)
 
-    # 4. Scene Change Dispatcher (Slot0.P1 = SCENE 0..3): read cached shadow enabled bit for Slot 1..5 safely
+    # 4. Scene Change Dispatcher (Slot0.P1 = SCENE 0..3): apply cached Scene A/B/C/D enabled bits for Slots 1..5
     pad_to_pkt()
     scene_check_va = cur_va()
     w.extend([
         mvkl_s(1, OS_ACTIVE_SLOTS, 5),
         mvkh_s(1, OS_ACTIVE_SLOTS, 5),
-        ldw_off(1, 0, 5, 2, 10),     # a10 = Slot0.SCENE (P1 @ +8)
+        ldw_off(1, 0, 5, 2, 10),     # a10 = Slot0.SCENE (P1 @ +8, 0=A, 1=B, 2=C, 3=D)
         ldw_off(0, 0, 12, 1, 0),     # a0 = last_scene
         nop(4),
         sub_l(0, 10, 0, 1),          # a1 = scene - last_scene
@@ -286,21 +293,42 @@ def _assemble_scene_engine() -> bytes:
     w.extend([nop(1), nop(5)])       # [!a1] -> skip to expression check
 
     w.append(stw_off(0, 0, 10, 12, 1))  # state[1] = active scene
-    # Safely apply cached Shadow B slot 1 On/Off (raw[1*18 + 17] bit 7 at offset +35, word 8 byte 3 = >> 31) via SEM_PEND + FX_SET_PARAM(slot=1, param=0)
+    # Clamp scene (a10) to 0..3, then compute a13 = ADDR_SHADOW_CACHE + (scene << 8)
+    w.extend([
+        mvk_s(0, 3, 2),
+        cmpgtu_l(0, 2, 10, 0),       # a0 = (scene > 3 unsigned)
+        mvk_s(0, 0, 10, cond=CREG_A0),
+        add_l(0, 10, 10, 13),        # a13 = scene * 2
+        add_l(0, 13, 13, 13),        # *4
+        add_l(0, 13, 13, 13),        # *8
+        add_l(0, 13, 13, 13),        # *16
+        add_l(0, 13, 13, 13),        # *32
+        add_l(0, 13, 13, 13),        # *64
+        add_l(0, 13, 13, 13),        # *128
+        add_l(0, 13, 13, 13),        # *256 (scene << 8)
+        mvkl_s(0, ADDR_SHADOW_CACHE, 1),
+        mvkh_s(0, ADDR_SHADOW_CACHE, 1),
+        add_l(0, 1, 13, 13),         # a13 = cached 122B record pointer for Scene A/B/C/D (callee-saved!)
+    ])
     w.extend([ldw_b14(B14_SEM_HANDLE_W, 4), mvk_l(1, -1, 4)])
     farcall(OS_SEM_PEND, cur_va() + 24, w)
-    w.extend([
-        mvkl_s(1, ADDR_SHADOW_CACHE, 5),
-        mvkh_s(1, ADDR_SHADOW_CACHE, 5),
-        ldw_off(1, 0, 5, 8, 6),      # a6 = word 8 (bytes +32..+35; byte 35 bit 7 is Slot 1 enabled bit)
-        mvk_s(0, 1, 4),              # a4 = Slot 1 (Pedal 1)
-        mvk_s(1, 0, 4),              # b4 = param 0 (On/Off)
-        mvk_l(1, 0, 6),              # b6 = 0
-        mvk_l(0, 1, 8),              # a8 = 1
-        nop(1),
-        shru_s(0, 6, 31, 6),         # a6 = enabled (0 or 1), safe regardless of patch contents
-    ])
-    farcall(OS_FX_SET_PARAM, cur_va() + 24, w)
+    # Apply On/Off (param 0) for Slots 1..5 from cached 122B record: slot s enabled bit is raw[s*18] bit 0
+    for slot_idx in range(1, 6):
+        byte_off = slot_idx * 18
+        word_off = byte_off // 4
+        bit_shift = (byte_off % 4) * 8
+        w.extend([
+            ldw_off(0, 0, 13, word_off, 6),  # a6 = word containing raw[slot_idx * 18]
+            mvk_s(0, slot_idx, 4),           # a4 = slot_idx (1..5)
+            mvk_s(1, 0, 4),                  # b4 = param 0 (On/Off)
+            mvk_l(1, 0, 6),                  # b6 = 0
+            mvk_l(0, 1, 8),                  # a8 = 1
+            mvk_s(0, 1, 2),                  # a2 = 1 mask (5 cycles after ldw -> a6 ready)
+        ])
+        if bit_shift > 0:
+            w.append(shru_s(0, 6, bit_shift, 6))
+        w.append(and_l(0, 6, 2, 6))          # a6 = enabled (0 or 1)
+        farcall(OS_FX_SET_PARAM, cur_va() + 24, w)
     w.append(ldw_b14(B14_SEM_HANDLE_W, 4))
     farcall(OS_SEM_POST, cur_va() + 24, w)
     w.extend([ldw_b14(B14_UI_EVENT_W, 4), mvk_s(1, 0x40, 4)])

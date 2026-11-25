@@ -88,11 +88,12 @@ def test_generated_yaml_patches_valid_and_32b_aligned(tmp_path: Path):
     # - add_lcst(0, 10, 12, 10) = 0x05298058 (a10 = 3*r + 12, never src2=a12!)
     # - add_lcst(0, 10, 0..2, 4) = 0x02280058 / 0x02282058 / 0x02284058
     # - mvk_l(1, -1, 4) = 0x027CA35A (matches handler.S BIOS_WAIT_FOREVER)
-    # - shru_s(0, 6, 31, 6) = 0x031BE9A0 (op=0x09A0, never broken 0x0220)
+    # - shru_s(0, 6, 16, 6) = 0x031A09A0 (op=0x09A0 for raw[s*18] bit extraction, never broken 0x0220)
+    assert has_32bit_const(se_words, 0x02000195)  # 28-bit MSOG SCENE.ZDL live patch slot ID
     assert 0x05298058 in se_words
     assert {0x02280058, 0x02282058, 0x02284058}.issubset(se_words)
     assert 0x027CA35A in se_words
-    assert 0x031BE9A0 in se_words
+    assert 0x031A09A0 in se_words
 
     # Critical #1: no-scene-autosave.yaml must chain IS_DIRTY (0xC00ACBC4 -> tempo-hold 0xC00D47B0),
     # Task_MIDI PC call site (0xC00AEE90 -> midi-settings 0xC00B2D0C), and check Slot 0 fxid == 0x0195
