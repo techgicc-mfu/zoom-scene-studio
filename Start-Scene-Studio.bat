@@ -16,21 +16,21 @@ if not exist "app\node_modules" (
     call npm --prefix app install
 )
 
-echo Starting Scene Studio local server on http://localhost:5173 ...
-start "SceneStudioServer" /min cmd /c "npm --prefix app run dev"
+echo Starting Scene Studio local server on http://127.0.0.1:5173 ...
+start "SceneStudioServer" /min cmd /c "npm --prefix app run dev -- --host 127.0.0.1 --port 5173"
 
 timeout /t 2 /nobreak >nul
 
 where msedge >nul 2>nul
 if %errorlevel%==0 (
-    start "" msedge --app=http://localhost:5173
+    start "" msedge --app=http://127.0.0.1:5173
     goto :eof
 )
 
 where chrome >nul 2>nul
 if %errorlevel%==0 (
-    start "" chrome --app=http://localhost:5173
+    start "" chrome --app=http://127.0.0.1:5173
     goto :eof
 )
 
-start "" http://localhost:5173
+start "" http://127.0.0.1:5173

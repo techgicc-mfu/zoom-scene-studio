@@ -124,22 +124,18 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(res.chocolateConnected).toBe(false);
   });
 
-  it('writes all 48 patches then verifies MS-50G persistence via post-0x51 0x29 read-back when zoomIn is connected', async () => {
+  it('waits for Zoom 7-byte 0x00 Store ACK per patch before advancing when zoomIn is connected', async () => {
     const sentCmds: number[] = [];
     const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
-    let lastWriteDump: Uint8Array | null = null;
     const zoomOut: any = {
       name: 'ZOOM MS Series',
       send: (d: Uint8Array | number[]) => {
         const arr = Array.from(d);
         if (arr[0] === 0xf0 && arr[1] === 0x52) {
           sentCmds.push(arr[4]);
-          if (arr[4] === 0x28) {
-            lastWriteDump = new Uint8Array(arr);
-          } else if (arr[4] === 0x29 && lastWriteDump) {
-            const reply = lastWriteDump;
+          if (arr[4] === 0x32) {
             setTimeout(() => {
-              zoomIn.onmidimessage?.({ data: reply });
+              zoomIn.onmidimessage?.({ data: new Uint8Array([0xf0, 0x52, 0x00, 0x61, 0x00, 0x00, 0xf7]) });
             }, 0);
           }
         }
@@ -151,11 +147,10 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(res.ok).toBe(true);
     expect(sentCmds[0]).toBe(0x50);
     expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
-    expect(sentCmds.filter((c) => c === 0x29)).toHaveLength(1);
     expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
   });
 
-  it('fails loudly instead of claiming synced when MS-50G does not reply to post-sync 0x29 read-back', async () => {
+  it('fails loudly instead of claiming synced when MS-50G never sends 0x00 Store ACK', async () => {
     const sentCmds: number[] = [];
     const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
     const zoomOut: any = {
@@ -170,10 +165,9 @@ describe('WebMidiService resilience & two-way sync', () => {
     const events: any[] = [];
     const res = await svc.syncAllToHardware(rigs, (p) => events.push(p), 1);
     expect(res.ok).toBe(false);
-    expect(res.userMessage).toMatch(/read-back verification/i);
+    expect(res.userMessage).toMatch(/0\/48 store ACKs/i);
     expect(events[events.length - 1]?.phase).toBe('error');
-    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
-    expect(sentCmds.filter((c) => c === 0x29)).toHaveLength(1);
+    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(1);
     expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
   });
 });

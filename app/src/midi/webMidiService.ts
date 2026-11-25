@@ -564,22 +564,21 @@ export class WebMidiService {
     };
   }
 
-  private readCurrentPatchDump(timeoutMs: number): Promise<Uint8Array | null> {
-    if (!this.zoomOut || !this.zoomIn || timeoutMs <= 0) {
-      return Promise.resolve(null);
+  private waitForZoomAck(timeoutMs: number): Promise<boolean> {
+    if (!this.zoomIn || timeoutMs <= 0) {
+      return sleep(timeoutMs).then(() => true);
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        if (this.pendingZoomDumpResolve) {
-          this.pendingZoomDumpResolve = null;
-          resolve(null);
+        if (this.pendingZoomAckResolve) {
+          this.pendingZoomAckResolve = null;
+          resolve(false);
         }
       }, timeoutMs);
-      this.pendingZoomDumpResolve = (bytes) => {
+      this.pendingZoomAckResolve = () => {
         clearTimeout(timer);
-        resolve(bytes);
+        resolve(true);
       };
-      this.zoomOut!.send(buildPatchRequestSysex(this.zoomModelId));
     });
   }
 
@@ -608,11 +607,12 @@ export class WebMidiService {
 
     if (this.zoomOut) {
       let currentIdx = 0;
-      // Legacy MS-50G / MS-70CDR (MSOG) does NOT send a 0x00 SysEx ACK after 0x32 Store;
-      // verify real hardware persistence via 0x29 read-back dump on Rig 01 and the final slot.
-      const verifyReadback = Boolean(this.zoomIn && delayMs > 0);
-      const writeWaitMs = delayMs > 1 ? Math.max(delayMs, 180) : delayMs;
-      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 350) : delayMs;
+      let ackedCount = 0;
+      // Hardware-verified: MS-70CDR 2.10 sends a 7-byte ACK [F0 52 00 61 00 00 F7] when 0x32 Store finishes.
+      // Waiting for each ACK before sending the next patch prevents USB MIDI buffer overflow (which dropped patches 35..48).
+      const waitForStoreAck = Boolean(this.zoomIn && delayMs > 0);
+      const writeWaitMs = delayMs > 1 ? Math.max(delayMs, 220) : delayMs;
+      const ackTimeoutMs = delayMs > 1 ? 5000 : 250;
       try {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
@@ -633,25 +633,19 @@ export class WebMidiService {
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
           await sleep(writeWaitMs);
+
+          const ackPromise = waitForStoreAck ? this.waitForZoomAck(ackTimeoutMs) : Promise.resolve(true);
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
-          await sleep(storeWaitMs);
-          step++;
-        }
-
-        // Exit Editor Mode (0x51) so MS-50G / MS-70CDR finishes committing flash before read-back verification
-        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-        await sleep(delayMs > 1 ? 400 : delayMs);
-
-        if (verifyReadback) {
-          this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
-          await sleep(delayMs);
-          this.zoomOut.send([0xc0, 0]);
-          await sleep(delayMs);
-          const dump = await this.readCurrentPatchDump(1200);
-          this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-          await sleep(delayMs);
-          if (!dump) {
-            const msg = `Zoom MS-50G did not reply to post-sync read-back verification [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Power-cycle USB, click Scan USB, and click Read from MS-50G to confirm your 48 patches.`;
+          const acked = await ackPromise;
+          if (acked) {
+            ackedCount++;
+          } else if (idx === 0) {
+            try {
+              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+            } catch {
+              // ignore exit-editor error
+            }
+            const msg = `Zoom MS-50G did not confirm saving Rig 01 (0/48 store ACKs) [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Power-cycle USB, click Scan USB, and try Sync All again.`;
             onProgress({
               phase: 'error',
               current: step,
@@ -660,9 +654,24 @@ export class WebMidiService {
             });
             return { ok: false, userMessage: msg };
           }
+          await sleep(delayMs);
+          step++;
         }
 
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+        await sleep(delayMs);
         this.zoomOut.send([0xc0, 0]);
+
+        if (waitForStoreAck && ackedCount < patches48.length) {
+          const msg = `Zoom MS-50G only confirmed ${ackedCount}/${patches48.length} patches [rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Click Scan USB and try Sync All again.`;
+          onProgress({
+            phase: 'error',
+            current: step,
+            total: totalSteps,
+            message: msg,
+          });
+          return { ok: false, userMessage: msg };
+        }
       } catch (err) {
         const failedRig =
           currentIdx < 12 ? currentIdx + 1 : Math.floor((currentIdx - 12) / 3) + 1;
