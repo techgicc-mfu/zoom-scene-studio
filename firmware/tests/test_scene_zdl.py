@@ -49,6 +49,9 @@ def test_build_scene_zdl_structure(tmp_path: Path):
     # Magic shuttle + TRIM multiply loop present in fallback audio stub
     from firmware.scene_zdl.build_zdl import PREASSEMBLED_C6740_AUDIO_STUB
     assert len(PREASSEMBLED_C6740_AUDIO_STUB) >= 64
+    # Must NEVER carry the old unrelocated 0x80000430 pointer in .audio, and must export TRIM_LUT in .dynsym
+    assert b"TRIM_LUT\x00" in elf
+    assert b"\x30\x04\x00\x80" not in PREASSEMBLED_C6740_AUDIO_STUB
 
 
 def test_extract_obj_audio_never_embeds_raw_elf_header(tmp_path: Path):

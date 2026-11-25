@@ -123,4 +123,30 @@ describe('WebMidiService resilience & two-way sync', () => {
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: origNav });
     expect(res.chocolateConnected).toBe(false);
   });
+
+  it('waits for Zoom 0x00 Store ACK before advancing when zoomIn is connected', async () => {
+    const sentCmds: number[] = [];
+    const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
+    const zoomOut: any = {
+      name: 'ZOOM MS Series',
+      send: (d: Uint8Array | number[]) => {
+        const arr = Array.from(d);
+        if (arr[0] === 0xf0 && arr[1] === 0x52) {
+          sentCmds.push(arr[4]);
+          if (arr[4] === 0x32) {
+            setTimeout(() => {
+              zoomIn.onmidimessage?.({ data: new Uint8Array([0xf0, 0x52, 0x00, 0x61, 0x00, 0x00, 0xf7]) });
+            }, 0);
+          }
+        }
+      },
+    };
+    const svc = new WebMidiService({ zoomOut, zoomIn, zoomModelId: 0x61 });
+    const rigs = Array.from({ length: 12 }, (_, i) => STARTER_TEMPLATES[0].createRig(i));
+    const res = await svc.syncAllToHardware(rigs, () => {}, 1);
+    expect(res.ok).toBe(true);
+    expect(sentCmds[0]).toBe(0x50);
+    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
+    expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
+  });
 });

@@ -116,6 +116,12 @@ def and_l(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CRE
     return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op
 
 
+def cmpgtu_l(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """CMPGTU .L1/.L2 src1, src2, dst (1 if unsigned src1 > src2; verified against handler.S 0x010029F8)."""
+    op = 0x09F8 | ((x & 1) << 12) | ((side & 1) << 1)
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op
+
+
 def mpy32_m(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
     """MPY32 .M1/.M2 src1, src2, dst (signed 32x32->32)."""
     # handler.S +0xb8? Wait +0xc0 / +0xd0: mpy32 is op 0x00000230?

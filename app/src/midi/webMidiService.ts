@@ -79,6 +79,8 @@ export class WebMidiService {
   private expressionListeners: Set<(ccVal: number) => void> = new Set();
   private connectionListeners: Set<(status: ReturnType<WebMidiService['getStatus']>) => void> = new Set();
   private pendingZoomDumpResolve: ((data: Uint8Array) => void) | null = null;
+  private pendingZoomAckResolve: (() => void) | null = null;
+  private pendingZoomIdentityResolve: (() => void) | null = null;
 
   constructor(injected?: InjectedPorts | null) {
     this.injected = injected;
@@ -280,9 +282,22 @@ export class WebMidiService {
       };
 
       if (this.zoomOut) {
+        const idPromise = this.zoomIn
+          ? new Promise<void>((resolve) => {
+              const t = setTimeout(() => {
+                if (this.pendingZoomIdentityResolve) {
+                  this.pendingZoomIdentityResolve = null;
+                  resolve();
+                }
+              }, 250);
+              this.pendingZoomIdentityResolve = () => {
+                clearTimeout(t);
+                resolve();
+              };
+            })
+          : Promise.resolve();
         this.zoomOut.send(new Uint8Array([0xf0, 0x7e, 0x00, 0x06, 0x01, 0xf7]));
-        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, 0x58, 0x50, 0xf7]));
-        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, 0x61, 0x50, 0xf7]));
+        await idPromise;
       }
       if (this.chocolateOut) {
         this.chocolateOut.send(buildChocolateDiscoverySysex());
@@ -320,6 +335,25 @@ export class WebMidiService {
       if (data[6] === 0x58 || data[6] === 0x61) {
         this.zoomModelId = data[6];
       }
+      if (this.pendingZoomIdentityResolve) {
+        const resolve = this.pendingZoomIdentityResolve;
+        this.pendingZoomIdentityResolve = null;
+        resolve();
+      }
+      return;
+    }
+    // Zoom SysEx Store / Command ACK: F0 52 00 <modelId> 00 ... F7
+    if (
+      data.length >= 6 &&
+      data[0] === 0xf0 &&
+      data[1] === 0x52 &&
+      (data[3] === 0x58 || data[3] === 0x61) &&
+      data[4] === 0x00 &&
+      this.pendingZoomAckResolve
+    ) {
+      const resolve = this.pendingZoomAckResolve;
+      this.pendingZoomAckResolve = null;
+      resolve();
       return;
     }
     // 146-byte Patch Dump response: F0 52 00 <modelId> 28 ... F7
@@ -495,6 +529,24 @@ export class WebMidiService {
     };
   }
 
+  private waitForZoomAck(timeoutMs: number): Promise<void> {
+    if (!this.zoomIn || timeoutMs <= 0) {
+      return sleep(timeoutMs);
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.pendingZoomAckResolve) {
+          this.pendingZoomAckResolve = null;
+          resolve();
+        }
+      }, timeoutMs);
+      this.pendingZoomAckResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+
   /**
    * Writes all 48 managed patches (12 Gig Rigs + 36 Shadow Snapshots) to the Zoom MS-50G
    * and pushes the complete Single-Bank + Short/Long + Salfini VP-1 Expression config to Chocolate Plus.
@@ -502,7 +554,7 @@ export class WebMidiService {
   public async syncAllToHardware(
     rigs: GigRig[],
     onProgress: (p: SyncProgress) => void,
-    delayMs: number = 40
+    delayMs: number = 80
   ): Promise<{ ok: boolean; userMessage: string }> {
     if (!this.zoomOut && !this.chocolateOut) {
       return {
@@ -540,11 +592,16 @@ export class WebMidiService {
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
           await sleep(delayMs);
+          const ackWait =
+            this.zoomIn && delayMs > 0 ? this.waitForZoomAck(1500) : Promise.resolve();
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
+          await ackWait;
           await sleep(delayMs);
           step++;
         }
 
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+        await sleep(delayMs);
         this.zoomOut.send([0xc0, 0]);
       } catch (err) {
         const failedRig =

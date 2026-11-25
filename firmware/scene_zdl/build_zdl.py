@@ -20,11 +20,13 @@ from firmware.midistomp_patch.c674x_asm import (
     CREG_A0,
     CREG_ALWAYS,
     CREG_NOT_A0,
+    add_l,
     add_lcst,
     addk_s,
     addsp_l1,
     b_disp,
     b_reg_s2,
+    cmpgtu_l,
     ldw_off,
     mpysp_m1,
     mv_l,
@@ -120,45 +122,18 @@ def _encode_zoom_screen_rle(title: str) -> bytes:
     return bytes(comp)
 
 
-def build_preassembled_audio_code(trim_lut_va: int = 0x80000400) -> bytes:
-    """Assembles real C674x machine code for Fx_FLT_SCENE(unsigned int *ctx):
+def build_preassembled_audio_code(trim_lut_va: int = 0x800000BC) -> tuple[bytes, list[tuple[int, int, int]]]:
+    """Assembles real relocatable C674x machine code for Fx_FLT_SCENE(unsigned int *ctx).
 
     1. Executes mandatory ctx[11]/ctx[12] magic pointer shuttle: *magicDst = *magicSrc.
-    2. Reads TRIM index from ACTIVE_PATCH_SLOT0_TRIM_ADDR (0xC009BF68), clamps 0..24.
-    3. Reads float gain from .const TRIM_LUT[trimIdx].
+    2. Reads TRIM index from ACTIVE_PATCH_SLOT0_TRIM_ADDR (0xC009BF68), clamps unsigned > 24 -> 12.
+    3. Loads float gain from relocated .const TRIM_LUT[trimIdx] (RT_ABS_L16 / RT_ABS_H16).
     4. Runs 8-sample stereo pass-through + gain accumulation:
          outBuf[s] += fxBuf[s] * gain; outBuf[s+8] += fxBuf[s+8] * gain;
     5. Returns cleanly to DSP host via B .S2 B3; NOP 5.
     """
-    # Registers: A4 = ctx
-    # First perform magic shuttle + load fxBuf (A5=ctx[5]), outBuf (A6=ctx[6]), gain (B6)
     base_va = 0x00000000
     w: list[int] = [
-        # ctx[12] -> B5 (magicSrc), ctx[11] -> A3 (&magicDst), ctx[5] -> A5 (fxBuf), ctx[6] -> A6 (outBuf)
-        ldw_off(0, 1, 4, 12, 5),     # +0x00: ldw .D1T2 *+a4(48), b5   (magicSrc)
-        ldw_off(0, 0, 4, 11, 3),     # +0x04: ldw .D1T1 *+a4(44), a3   (&magicDst)
-        ldw_off(0, 0, 4, 5, 5),      # +0x08: ldw .D1T1 *+a4(20), a5   (fxBuf)
-        ldw_off(0, 0, 4, 6, 6),      # +0x0C: ldw .D1T1 *+a4(24), a6   (outBuf)
-        nop(4),                      # +0x10: wait for loads
-        ldw_off(1, 1, 5, 0, 4),      # +0x14: ldw .D2T2 *+b5(0), b4    (*magicSrc)
-        ldw_off(0, 0, 3, 0, 3),      # +0x18: ldw .D1T1 *+a3(0), a3    (magicDst = *ctx[11])
-        nop(4),                      # +0x1C
-        stw_off(0, 1, 4, 3, 0),      # +0x20: stw .D1T2 b4, *+a3(0)    (*magicDst = *magicSrc)
-        # Load trimIdx from 0xC009BF68, clamp to 0..24 (default 12), load TRIM_LUT[trimIdx]
-        mvkl_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x24: a7 = &ACTIVE_PATCH_SLOT0_TRIM
-        mvkh_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x28
-        ldw_off(0, 0, 7, 0, 7),                      # +0x2C: a7 = trimIdx
-        mvkl_s(1, trim_lut_va, 7),                   # +0x30: b7 = TRIM_LUT base
-        mvkh_s(1, trim_lut_va, 7),                   # +0x34
-        mvk_s(0, 24, 8),                             # +0x38: a8 = 24
-        nop(1),                                      # +0x3C
-        addk_s(0, -25, 7),                           # check bounds: wait, keep simple: a0 = (trimIdx > 24)
-        # Re-load trimIdx cleanly & select unity (12) if > 24:
-    ]
-    # Emit compact loop on fetch packet 0x40..0x9F so offsets are exact
-    # Wait: simplify register allocation so zero aliasing bugs occur:
-    # A7 = trimIdx (0..24 else 12), A8 = loop count (8), A9 = byte offset
-    w = [
         # Fetch packet 0 (0x00..0x1F): Magic pointer shuttle & buffer pointers
         ldw_off(0, 1, 4, 12, 5),     # +0x00: b5 = ctx[12] (magicSrc)
         ldw_off(0, 0, 4, 11, 3),     # +0x04: a3 = ctx[11] (&magicDst)
@@ -169,25 +144,29 @@ def build_preassembled_audio_code(trim_lut_va: int = 0x80000400) -> bytes:
         ldw_off(0, 0, 3, 0, 3),      # +0x18: a3 = magicDst
         nop(4),                      # +0x1C
 
-        # Fetch packet 1 (0x20..0x3F): Store magic, load unity gain 1.0f (LUT[12])
-        stw_off(0, 1, 4, 3, 0),      # +0x20: *magicDst = *magicSrc
+        # Fetch packet 1 (0x20..0x3F): Store magic, load TRIM index + relocated TRIM_LUT base into A1
+        stw_off(0, 1, 4, 3, 0),                      # +0x20: *magicDst = *magicSrc
         mvkl_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x24: a7 = &ACTIVE_PATCH_SLOT0_TRIM
         mvkh_s(0, ACTIVE_PATCH_SLOT0_TRIM_ADDR, 7),  # +0x28
-        ldw_off(0, 0, 7, 0, 7),                      # +0x2C: a7 = trimIdx
-        mvkl_s(1, trim_lut_va + 12 * 4, 7),          # +0x30: b7 = &TRIM_LUT[12] (1.0f fallback)
-        mvkh_s(1, trim_lut_va + 12 * 4, 7),          # +0x34
-        nop(2),                                      # +0x38
-        ldw_off(1, 0, 7, 0, 8),                      # +0x3C: a8 = 1.0f (TRIM_LUT[12])
+        ldw_off(0, 0, 7, 0, 7),                      # +0x2C: a7 = trimIdx [ready after 4 cycles]
+    ]
+    lut_l16_off = len(w) * 4
+    w.append(mvkl_s(0, trim_lut_va, 1))              # +0x30: a1 = lo16(TRIM_LUT) (reloc RT_ABS_L16)
+    lut_h16_off = len(w) * 4
+    w.extend([
+        mvkh_s(0, trim_lut_va, 1),                   # +0x34: a1 |= hi16(TRIM_LUT) (reloc RT_ABS_H16)
+        mvk_s(0, 24, 9),                             # +0x38: a9 = 24
+        nop(2),                                      # +0x3C: total 5 cycles after ldw +0x2C -> a7 ready
 
-        # Fetch packet 2 (0x40..0x5F): Compare 0 <= trimIdx <= 24 -> load TRIM_LUT[trimIdx], else keep a8
-        mvk_s(0, 24, 9),                             # +0x40: a9 = 24
-        mv_l(0, 7, 0),                               # +0x44: a0 = trimIdx
-        nop(2),                                      # +0x48: wait a8 load
-        # Load scaled LUT entry if trimIdx <= 24 (simplified unsigned check: clamp bits & check <= 24)
-        mvkl_s(0, 0x0000001F, 1),                    # +0x4C: mask check not exceeding 24 -> load TRIM_LUT[12] + pass loop
-        mvk_s(0, 8, 9),                              # +0x50: loop s = 8 samples (L + R)
-        mvk_s(0, 0, 7),                              # +0x54: sample index word offset = 0
-        nop(2),                                      # +0x58..0x5F
+        # Fetch packet 2 (0x40..0x5F): Unsigned clamp trimIdx > 24 -> 12, load TRIM_LUT[trimIdx] into A8
+        cmpgtu_l(0, 9, 7, 0),                        # +0x40: a0 = (trimIdx > 24)
+        mvk_s(0, 12, 7, cond=CREG_A0),               # +0x44: if out of range, trimIdx = 12 (unity)
+        add_l(0, 7, 7, 7),                           # +0x48: a7 = 2 * trimIdx
+        add_l(0, 7, 7, 7),                           # +0x4C: a7 = 4 * trimIdx
+        add_l(0, 1, 7, 1),                           # +0x50: a1 = TRIM_LUT + 4 * trimIdx
+        ldw_off(0, 0, 1, 0, 8),                      # +0x54: a8 = TRIM_LUT[trimIdx] [ready after 4]
+        mvk_s(0, 8, 9),                              # +0x58: loop s = 8 samples (L + R)
+        nop(3),                                      # +0x5C: wait 4 cycles total before reading a8
 
         # Fetch packet 3 (0x60..0x7F): Stereo sample loop (L at *+a5(0), R at *+a5(8 words = 32B))
         ldw_off(0, 0, 5, 0, 1),                      # +0x60: a1 = fxBuf[s] (L)
@@ -215,11 +194,12 @@ def build_preassembled_audio_code(trim_lut_va: int = 0x80000400) -> bytes:
         nop(5),                                      # +0xA8
         b_reg_s2(3),                                 # +0xAC: b .S2 b3
         nop(5),                                      # +0xB0
-    ]
-    return pack_words_padded32(w)
+    ])
+    relocs = [(lut_l16_off, 9, trim_lut_va), (lut_h16_off, 10, trim_lut_va)]
+    return pack_words_padded32(w), relocs
 
 
-PREASSEMBLED_C6740_AUDIO_STUB = build_preassembled_audio_code()
+PREASSEMBLED_C6740_AUDIO_STUB, _ = build_preassembled_audio_code()
 
 
 # 200-byte NoiseGate Dll_ entry template from repeat98/ZoomMultistompZDL/build/linker.py
@@ -314,7 +294,11 @@ def extract_obj_sections(obj_path: Path) -> tuple[bytes, bytes]:
     return audio_bytes, b"".join(const_parts)
 
 
-def _compile_or_fallback_audio(cl6x_path: Path | None, work_dir: Path) -> tuple[bytes, bytes]:
+def _compile_or_fallback_audio(
+    cl6x_path: Path | None,
+    work_dir: Path,
+    trim_lut_va: int,
+) -> tuple[bytes, bytes, list[tuple[int, int, int]]]:
     src = Path(__file__).resolve().parent / "scene.c"
     if cl6x_path is not None and cl6x_path.exists():
         obj = work_dir / "scene.obj"
@@ -332,8 +316,10 @@ def _compile_or_fallback_audio(cl6x_path: Path | None, work_dir: Path) -> tuple[
             ],
             check=True,
         )
-        return extract_obj_sections(obj)
-    return PREASSEMBLED_C6740_AUDIO_STUB, b""
+        audio_b, const_b = extract_obj_sections(obj)
+        return audio_b, const_b, []
+    audio_b, relocs = build_preassembled_audio_code(trim_lut_va=trim_lut_va)
+    return audio_b, b"", relocs
 
 
 def _elf_hash(name: str) -> int:
@@ -354,8 +340,11 @@ def _align_up(val: int, align: int) -> int:
 def _build_c6000_elf_payload(
     manifest: dict,
     audio_bytes: bytes,
+    audio_relocs: list[tuple[int, int, int]],
     extra_const: bytes,
     icon_bmp: bytes,
+    pic_rle: bytes,
+    lut_off: int,
 ) -> bytes:
     """Builds a ZoomMultistompZDL-compliant TI C674x EABI ET_DYN ELF shared object."""
     effect_name = manifest["effect_name"].upper()[:8]
@@ -364,6 +353,7 @@ def _build_c6000_elf_payload(
 
     TEXT_VA = 0x00000000
     CONST_VA = 0x80000000
+    lut_va = CONST_VA + lut_off
 
     # --- 1. .text layout ---
     audio_pad = _align_up(len(audio_bytes), 32)
@@ -382,11 +372,9 @@ def _build_c6000_elf_payload(
         out_text[ko:ko + 32] = _NOP_RETURN
 
     # --- 2. .const layout: Zoom RLE pic + TRIM_LUT + SonicStomp descriptor + effectTypeImageInfo + extra .const ---
-    pic_rle = _encode_zoom_screen_rle(effect_name)
     const_buf = bytearray(pic_rle)
 
-    # Embed icon BMP reference + TRIM_LUT right after RLE screen
-    lut_off = _align_up(len(const_buf), 4)
+    # Embed TRIM_LUT at exact lut_va + extra .const + icon BMP reference
     const_buf.extend(b"\x00" * (lut_off - len(const_buf)))
     const_buf.extend(b"".join(struct.pack("<f", v) for v in TRIM_LUT))
     const_buf.extend(extra_const)
@@ -486,6 +474,8 @@ def _build_c6000_elf_payload(
         dyn_relocs.append((desc_va + off_in_d, 1, tgt))
     for off_in_i, tgt in info_relocs:
         dyn_relocs.append((info_va + off_in_i, 1, tgt))
+    for audio_off, rtype, tgt in audio_relocs:
+        dyn_relocs.append((TEXT_VA + audio_off, rtype, tgt))
 
     # --- 4. .dynsym, .dynstr, .hash, .rela.dyn ---
     dynstr = bytearray(b"\x00")
@@ -521,6 +511,7 @@ def _build_c6000_elf_payload(
 
     add_sym("_infoEffectTypeKnob_A_2", knob_info_va, len(fardata), 1, 0, 2)
     add_sym(f"picEffectType_{effect_name}", CONST_VA, len(pic_rle), 1, 0, 2)
+    add_sym("TRIM_LUT", lut_va, len(TRIM_LUT) * 4, 1, 0, 2)
     for i in reversed(range(len(params))):
         pname = params[i]["name"].replace(" ", "")
         add_sym(f"Fx_FLT_{effect_name}_{pname}_edit", TEXT_VA + knob_offs[i], 0, 2, 0, 2)
@@ -662,9 +653,13 @@ def build_scene_zdl(out_path: Path, cl6x_path: Path | None = None) -> bytes:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    audio_bytes, extra_const = _compile_or_fallback_audio(cl6x_path, out_path.parent)
+    effect_name = manifest["effect_name"].upper()[:8]
+    pic_rle = _encode_zoom_screen_rle(effect_name)
+    lut_off = _align_up(len(pic_rle), 4)
+    lut_va = 0x80000000 + lut_off
+    audio_bytes, extra_const, audio_relocs = _compile_or_fallback_audio(cl6x_path, out_path.parent, lut_va)
     icon_bmp = build_scene_icon_bmp()
-    elf_blob = _build_c6000_elf_payload(manifest, audio_bytes, extra_const, icon_bmp)
+    elf_blob = _build_c6000_elf_payload(manifest, audio_bytes, audio_relocs, extra_const, icon_bmp, pic_rle, lut_off)
 
     # Authentic 76-byte (0x4C) Zoom ZDL outer header (ZoomMultistompZDL zdl.py / linker.py)
     hdr = bytearray(0x4C)

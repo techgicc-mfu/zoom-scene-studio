@@ -22,6 +22,7 @@ from firmware.midistomp_patch.c674x_asm import (
     b_disp,
     b_reg_s2,
     callp,
+    cmpgtu_l,
     farcall,
     ldw_b14,
     ldw_off,
@@ -32,6 +33,7 @@ from firmware.midistomp_patch.c674x_asm import (
     mvkl_s,
     nop,
     pack_words_padded32,
+    shru_s,
     stw_off,
     sub_l,
 )
@@ -217,7 +219,7 @@ def _assemble_scene_engine() -> bytes:
     farcall(OS_DIAG_POLL, cur_va() + 24, w)
     w.append(stw_off(1, 0, 4, 15, 7))  # save ticks in frame[7]
 
-    # 2. Verify Slot0.fxid == 0x0195 and CUR_PATCH in 0..11; load state pointers
+    # 2. Verify Slot0.fxid == 0x0195 and 0 <= CUR_PATCH < 12 (never run REC_LOAD on shadow/unmanaged slots!)
     w.extend([
         mvkl_s(1, OS_ACTIVE_SLOTS, 5),
         mvkh_s(1, OS_ACTIVE_SLOTS, 5),
@@ -225,13 +227,18 @@ def _assemble_scene_engine() -> bytes:
         ldw_b14(B14_CUR_PATCH_W, 11),# a11 = CUR_PATCH
         mvkl_s(0, SCENE_FXID, 0),
         mvkh_s(0, SCENE_FXID, 0),
-        nop(3),
+        mvk_s(0, 11, 2),             # a2 = 11 (max playable Gig Rig index)
+        nop(2),
         sub_l(0, 10, 0, 1),          # a1 = fxid - 0x0195
+        cmpgtu_l(0, 2, 11, 2),       # a2 = (CUR_PATCH > 11 unsigned)
     ])
     pad_to_pkt()
-    # We'll fill epilogue jump once epilogue_va is placed; compute skip offsets cleanly by building sub-blocks
+    # Branch to epilogue if not SCENE.ZDL ([a1]) or not Rig 01..12 ([a2])
+    pkt_guard_va = cur_va()
     skip_branch_idx = len(w)
-    w.extend([nop(1), nop(5)])       # placeholder for [!a1]/branch to epilogue if not SCENE.ZDL
+    w.append(nop(1))                 # placeholder: [a1] b epilogue_va
+    skip_rig_bounds_idx = len(w)
+    w.extend([nop(1), nop(5)])       # placeholder: [a2] b epilogue_va
 
     # 3. Pre-cache Shadow Records 12 + r*3 + {0,1,2} into DDR ADDR_SHADOW_CACHE when CUR_PATCH != last_rig
     w.extend([
@@ -245,11 +252,12 @@ def _assemble_scene_engine() -> bytes:
     skip_rec_load_idx = len(w)
     w.extend([nop(1), nop(5)])       # placeholder: [!a1] skip to scene check
 
-    # Rig changed -> store new last_rig, reset last_scene=0, pre-load 3 Shadow Records via REC_LOAD
+    # Rig changed -> store new last_rig, reset last_scene=0 and last_expr=0, pre-load 3 Shadow Records via REC_LOAD
     w.extend([
         stw_off(0, 0, 11, 12, 0),    # state[0] = CUR_PATCH
         mvk_s(0, 0, 13),
         stw_off(0, 0, 13, 12, 1),    # state[1] = 0 (last_scene = Scene A)
+        stw_off(0, 0, 13, 12, 2),    # state[2] = 0 (last_expr = 0)
         add_l(0, 11, 11, 10),        # a10 = 2 * r
         add_l(0, 10, 11, 10),        # a10 = 3 * r
         add_lcst(0, 12, 10, 10),     # a10 = 12 + 3 * r (Shadow B record index)
@@ -262,7 +270,7 @@ def _assemble_scene_engine() -> bytes:
         ])
         farcall(OS_REC_LOAD, cur_va() + 24, w)
 
-    # 4. Scene Change Dispatcher (Slot0.P1 = SCENE 0..3): read DDR cache & apply diffed FX_SET_PARAM
+    # 4. Scene Change Dispatcher (Slot0.P1 = SCENE 0..3): read cached shadow enabled bit for Slot 1..5 safely
     pad_to_pkt()
     scene_check_va = cur_va()
     w.extend([
@@ -278,23 +286,23 @@ def _assemble_scene_engine() -> bytes:
     w.extend([nop(1), nop(5)])       # [!a1] -> skip to expression check
 
     w.append(stw_off(0, 0, 10, 12, 1))  # state[1] = active scene
-    # Acquire OS effect semaphore -> dispatch FX_SET_PARAM(slot, param, val, 0, 1) -> SEM_POST + UI_REFRESH + EVENT_POST
+    # Safely apply cached Shadow B slot 1 On/Off (raw[1*18 + 17] bit 7 at offset +35, word 8 byte 3 = >> 31) via SEM_PEND + FX_SET_PARAM(slot=1, param=0)
     w.extend([ldw_b14(B14_SEM_HANDLE_W, 4), mvk_l(1, -1, 4)])
     farcall(OS_SEM_PEND, cur_va() + 24, w)
     w.extend([
-        mvk_s(0, 0, 4),              # slot 0..5 resolved from cached table
-        mvk_s(1, 0, 4),              # param 0..9
         mvkl_s(1, ADDR_SHADOW_CACHE, 5),
         mvkh_s(1, ADDR_SHADOW_CACHE, 5),
-        ldw_off(1, 0, 5, 0, 6),      # target value
+        ldw_off(1, 0, 5, 8, 6),      # a6 = word 8 (bytes +32..+35; byte 35 bit 7 is Slot 1 enabled bit)
+        mvk_s(0, 1, 4),              # a4 = Slot 1 (Pedal 1)
+        mvk_s(1, 0, 4),              # b4 = param 0 (On/Off)
         mvk_l(1, 0, 6),              # b6 = 0
         mvk_l(0, 1, 8),              # a8 = 1
-        nop(2),
+        nop(1),
+        shru_s(0, 6, 31, 6),         # a6 = enabled (0 or 1), safe regardless of patch contents
     ])
     farcall(OS_FX_SET_PARAM, cur_va() + 24, w)
     w.append(ldw_b14(B14_SEM_HANDLE_W, 4))
     farcall(OS_SEM_POST, cur_va() + 24, w)
-    farcall(OS_UI_REFRESH, cur_va() + 24, w)
     w.extend([ldw_b14(B14_UI_EVENT_W, 4), mvk_s(1, 0x40, 4)])
     farcall(OS_EVENT_POST, cur_va() + 24, w)
 
@@ -363,7 +371,8 @@ def _assemble_scene_engine() -> bytes:
     ])
 
     # Patch forward conditional branch targets now that all packet VAs are known
-    w[skip_branch_idx] = b_disp(epilogue_va, base + skip_branch_idx * 4, cond=CREG_A1)
+    w[skip_branch_idx] = b_disp(epilogue_va, pkt_guard_va, cond=CREG_A1)
+    w[skip_rig_bounds_idx] = b_disp(epilogue_va, pkt_guard_va, cond=CREG_A2)
     w[skip_rec_load_idx] = b_disp(scene_check_va, base + skip_rec_load_idx * 4, cond=CREG_NOT_A1)
     w[skip_scene_apply_idx] = b_disp(expr_check_va, base + skip_scene_apply_idx * 4, cond=CREG_NOT_A1)
     w[skip_expr_apply_idx] = b_disp(epilogue_va, base + skip_expr_apply_idx * 4, cond=CREG_NOT_A1)
