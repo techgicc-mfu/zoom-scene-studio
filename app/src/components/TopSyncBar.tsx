@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { webMidiService } from '../midi/webMidiService';
 import { useRigStore } from '../store/rigStore';
 import { SyncProgress } from '../types/rig';
@@ -9,6 +9,7 @@ interface TopSyncBarProps {
   statusMessage: string;
   syncProgress: SyncProgress | null;
   onScanUsb: () => void;
+  onReadFromPedal: () => void;
   onOpenSetupGuide: () => void;
   onSyncAll: () => void;
   onStatusToast: (msg: string) => void;
@@ -20,6 +21,7 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
   statusMessage,
   syncProgress,
   onScanUsb,
+  onReadFromPedal,
   onOpenSetupGuide,
   onSyncAll,
   onStatusToast,
@@ -27,17 +29,29 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
   const exportRigPackJson = useRigStore((s) => s.exportRigPackJson);
   const importRigPackJson = useRigStore((s) => s.importRigPackJson);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [autoBackupBeforeSync, setAutoBackupBeforeSync] = useState(true);
 
-  const handleSaveBackup = () => {
+  const downloadJson = (filename: string) => {
     const json = exportRigPackJson();
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'MS50G-SceneStudio-Rigs.json';
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleSaveBackup = () => {
+    downloadJson('MS50G-SceneStudio-Rigs.json');
     onStatusToast('Saved your 12 Gig Rigs to MS50G-SceneStudio-Rigs.json');
+  };
+
+  const handleSyncClick = () => {
+    if (autoBackupBeforeSync) {
+      downloadJson('MS50G-SceneStudio-PreSync-Backup.json');
+    }
+    onSyncAll();
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -67,12 +81,21 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
         <span className={`conn-pill ${chocolateConnected ? 'pill-ok' : 'pill-idle'}`}>
           ● {chocolateConnected ? 'Chocolate Plus Connected' : 'Chocolate Plus Not Detected'}
         </span>
-        <button type="button" className="top-secondary-btn" onClick={onScanUsb}>
+        <button type="button" className="top-secondary-btn" onClick={onScanUsb} disabled={isSyncing}>
           Scan USB
         </button>
       </div>
 
       <div className="top-actions-cluster">
+        <button
+          type="button"
+          className="top-secondary-btn"
+          disabled={isSyncing}
+          onClick={onReadFromPedal}
+          title="Import all 12 Gig Rigs & custom pedals currently stored on your MS-50G"
+        >
+          Read from MS-50G
+        </button>
         <button type="button" className="top-secondary-btn" onClick={handleSaveBackup}>
           Save Rig File
         </button>
@@ -93,18 +116,29 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
         <button type="button" className="top-guide-btn" onClick={onOpenSetupGuide}>
           ⚡ Wireless & Setup Guide
         </button>
+        <label className="backup-toggle-label" title="Download a JSON backup copy right before overwriting your pedal">
+          <input
+            type="checkbox"
+            checked={autoBackupBeforeSync}
+            onChange={(e) => setAutoBackupBeforeSync(e.target.checked)}
+          />
+          Auto-backup
+        </label>
         <button
           type="button"
           className="sync-all-btn"
           disabled={isSyncing}
-          onClick={onSyncAll}
+          onClick={handleSyncClick}
         >
           {isSyncing ? 'SYNCING...' : 'SYNC ALL TO PEDALS'}
         </button>
       </div>
 
       {(statusMessage || syncProgress) && (
-        <div className="top-status-strip">
+        <div
+          className={`top-status-strip ${syncProgress?.phase === 'error' ? 'top-status-error' : ''}`}
+          role="status"
+        >
           <span>{syncProgress ? syncProgress.message : statusMessage}</span>
           {syncProgress && syncProgress.total > 0 && (
             <div className="sync-progress-track">

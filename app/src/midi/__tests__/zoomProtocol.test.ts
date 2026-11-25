@@ -1,38 +1,54 @@
 import { describe, it, expect } from 'vitest';
 import {
+  RAW_PATCH_BYTES,
   packRawPatch128,
   unpackRawPatch128,
-  encodeMidi7Bit146,
-  decodeMidi7Bit146,
+  buildPatchWriteSysex,
+  decodePatchReadSysex,
   compileRigsTo48Patches,
   decompile48PatchesToRigs,
 } from '../zoomProtocol';
+import { EFFECT_CATALOG } from '../../data/effectCatalog';
 import { STARTER_TEMPLATES } from '../../data/starterTemplates';
 
-describe('Zoom MS-50G 128B <-> 146B bitpacker & 48-patch shadow compiler', () => {
-  it('round-trips 128-byte raw patches through 146-byte 7-bit MIDI encoding', () => {
-    const raw = new Uint8Array(128).map((_, i) => (i === 127 ? 0x15 : (i * 37 + 0x80) & 0xff));
-    const midi146 = encodeMidi7Bit146(raw);
-    expect(midi146.length).toBe(146);
-    expect(midi146.every((b) => b <= 0x7f)).toBe(true);
-    expect(Array.from(decodeMidi7Bit146(midi146))).toEqual(Array.from(raw));
-  });
-
-  it('preserves boundary parameter values and unknown custom fxids losslessly', () => {
+describe('Zoom MS-50G authentic 122B <-> 146B MSOG bitpacker & 48-patch shadow compiler', () => {
+  it('packs authentic 122-byte MSOG patch layout (name at 111..120, tempo split in 109..110) into 146B 0x28 SysEx', () => {
     const slots = [
-      { enabled: true, fxid: 0x0195, params: [3, 100, 24, 0, 0, 0, 0, 0, 0] },
-      { enabled: false, fxid: 0x01ff, params: [511, 255, 0, 127, 63, 31, 15, 7, 1] },
-      ...Array.from({ length: 4 }, () => ({ enabled: true, fxid: 0x0021, params: [50, 60, 70, 0, 0, 0, 0, 0, 0] })),
+      { enabled: true, fxid: 0x02000195, params: [3, 100, 24, 0, 0, 0, 0, 0, 0] },
+      { enabled: true, fxid: 0x040000f0, params: [58, 30, 100, 50, 50, 50, 50, 240, 0] }, // MS 1959 real 28-bit ID
+      { enabled: false, fxid: 0x08000010, params: [559, 64, 56, 5, 100, 0, 0, 0, 0] }, // TapeEcho
+      ...Array.from({ length: 3 }, () => ({ enabled: true, fxid: 0x03000020, params: [70, 50, 100, 0, 0, 0, 0, 0, 0] })),
     ];
-    const raw = packRawPatch128(slots, 'ROCK PLEXI', 120);
-    const parsed = unpackRawPatch128(raw);
+    const raw = packRawPatch128(slots, 'ROCK PLEXI', 123);
+    expect(raw.length).toBe(RAW_PATCH_BYTES); // 122 authentic MSOG bytes
+    // Authentic MSOG layout: name lives at bytes 111..120, trailer at 121 = 0x00
+    const asciiName = Array.from(raw.slice(111, 121))
+      .map((b) => String.fromCharCode(b))
+      .join('');
+    expect(asciiName).toBe('ROCK PLEXI');
+    expect(raw[121]).toBe(0);
+
+    const sysex146 = buildPatchWriteSysex(0x61, 0, raw);
+    expect(sysex146.length).toBe(146);
+    expect(sysex146[4]).toBe(0x28);
+    expect(sysex146[145]).toBe(0xf7);
+
+    const decoded = decodePatchReadSysex(sysex146);
+    expect(Array.from(decoded)).toEqual(Array.from(raw));
+
+    const parsed = unpackRawPatch128(decoded);
     expect(parsed.name).toBe('ROCK PLEXI');
-    expect(parsed.slots6[1].fxid).toBe(0x01ff);
-    expect(parsed.slots6[1].enabled).toBe(false);
-    expect(parsed.slots6[1].params).toEqual([511, 255, 0, 127, 63, 31, 15, 7, 1]);
+    expect(parsed.tempo).toBe(123);
+    expect(parsed.slots6[1].fxid).toBe(0x040000f0);
+    expect(parsed.slots6[2].enabled).toBe(false);
+    expect(parsed.slots6[2].params[0]).toBe(559);
   });
 
-  it('compiles 12 GigRigs into 48 patches with exact shadow metadata and decompiles cleanly', () => {
+  it('uses >= 40 real 28-bit MSOG Effect IDs in EFFECT_CATALOG and round-trips 48 patches', () => {
+    expect(EFFECT_CATALOG.length).toBeGreaterThanOrEqual(40);
+    expect(EFFECT_CATALOG.some((fx) => fx.fxid === 0x040000f0)).toBe(true); // MS 1959
+    expect(EFFECT_CATALOG.some((fx) => fx.fxid === 0x09000180)).toBe(true); // ShimmerRv
+
     const rigs = Array.from({ length: 12 }, (_, i) =>
       STARTER_TEMPLATES[i % STARTER_TEMPLATES.length].createRig(i)
     );

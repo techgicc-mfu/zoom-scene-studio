@@ -6,20 +6,26 @@ import {
   SCENE_CC_VALUES,
 } from './chocolateProtocol';
 import {
+  buildPatchRequestSysex,
   buildPatchStoreSysex,
   buildPatchWriteSysex,
   compileRigsTo48Patches,
+  decompile48PatchesToRigs,
+  decodePatchReadSysex,
+  MIDI_PATCH_BYTES,
 } from './zoomProtocol';
 
 export interface MidiPortLike {
   id?: string;
   name?: string | null;
+  state?: string;
   send: (data: number[] | Uint8Array) => void;
 }
 
 export interface MidiInputLike {
   id?: string;
   name?: string | null;
+  state?: string;
   onmidimessage: ((ev: { data: Uint8Array }) => void) | null;
 }
 
@@ -45,14 +51,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isUnambiguousChocolateName(label: string): boolean {
+  return (
+    label.includes('sinco') ||
+    label.includes('footctrl') ||
+    label.includes('chocolate') ||
+    label.includes('m-vave')
+  );
+}
+
+function isZoomName(label: string): boolean {
+  return (
+    label.includes('zoom') ||
+    label.includes('ms-50') ||
+    label.includes('ms-70') ||
+    label.includes('ms series')
+  );
+}
+
 export class WebMidiService {
   private zoomOut: MidiPortLike | null = null;
   private zoomIn: MidiInputLike | null = null;
   private chocolateOut: MidiPortLike | null = null;
   private chocolateIn: MidiInputLike | null = null;
-  private zoomModelId: 0x58 | 0x61 = 0x61; // MIDISTOMP V2.0 defaults to 0x61 (also checks 0x58)
+  private zoomModelId: 0x58 | 0x61 = 0x61;
   private injected: InjectedPorts | null | undefined;
   private expressionListeners: Set<(ccVal: number) => void> = new Set();
+  private connectionListeners: Set<(status: ReturnType<WebMidiService['getStatus']>) => void> = new Set();
+  private pendingZoomDumpResolve: ((data: Uint8Array) => void) | null = null;
 
   constructor(injected?: InjectedPorts | null) {
     this.injected = injected;
@@ -61,6 +87,12 @@ export class WebMidiService {
       this.zoomIn = injected.zoomIn ?? null;
       this.chocolateOut = injected.chocolateOut ?? null;
       this.chocolateIn = injected.chocolateIn ?? null;
+      if (this.zoomIn) {
+        this.zoomIn.onmidimessage = (ev) => this.handleZoomReply(ev.data);
+      }
+      if (this.chocolateIn) {
+        this.chocolateIn.onmidimessage = (ev) => this.handleChocolateInput(ev.data);
+      }
       if (injected.zoomModelId) this.zoomModelId = injected.zoomModelId;
     }
   }
@@ -79,6 +111,20 @@ export class WebMidiService {
     return () => {
       this.expressionListeners.delete(cb);
     };
+  }
+
+  public onConnectionChange(
+    cb: (status: ReturnType<WebMidiService['getStatus']>) => void
+  ): () => void {
+    this.connectionListeners.add(cb);
+    return () => {
+      this.connectionListeners.delete(cb);
+    };
+  }
+
+  private notifyConnectionChange(): void {
+    const status = this.getStatus();
+    for (const cb of this.connectionListeners) cb(status);
   }
 
   public async connect(): Promise<ConnectResult> {
@@ -124,39 +170,115 @@ export class WebMidiService {
       this.chocolateOut = null;
       this.chocolateIn = null;
 
+      const genericOutputs: MidiPortLike[] = [];
+      const genericInputs: MidiInputLike[] = [];
+
       for (const output of access.outputs.values()) {
         const label = String(output.name || '').toLowerCase();
-        if (label.includes('zoom') || label.includes('ms-50') || label.includes('ms-70') || label.includes('ms series')) {
+        if (isZoomName(label)) {
           this.zoomOut = output;
-        } else if (
-          label.includes('sinco') ||
-          label.includes('footctrl') ||
-          label.includes('chocolate') ||
-          label.includes('m-vave') ||
-          label.includes('usb midi')
-        ) {
+        } else if (isUnambiguousChocolateName(label)) {
           this.chocolateOut = output;
+        } else if (label.includes('usb midi')) {
+          genericOutputs.push(output);
         }
       }
 
       for (const input of access.inputs.values()) {
         const label = String(input.name || '').toLowerCase();
-        if (label.includes('zoom') || label.includes('ms-50') || label.includes('ms-70') || label.includes('ms series')) {
+        if (isZoomName(label)) {
           this.zoomIn = input;
           input.onmidimessage = (ev: { data: Uint8Array }) => this.handleZoomReply(ev.data);
-        } else if (
-          label.includes('sinco') ||
-          label.includes('footctrl') ||
-          label.includes('chocolate') ||
-          label.includes('m-vave') ||
-          label.includes('usb midi')
-        ) {
+        } else if (isUnambiguousChocolateName(label)) {
           this.chocolateIn = input;
           input.onmidimessage = (ev: { data: Uint8Array }) => this.handleChocolateInput(ev.data);
+        } else if (label.includes('usb midi')) {
+          genericInputs.push(input);
         }
       }
 
-      // Query Zoom Identity Request to detect 0x58 (MS-50G) vs 0x61 (MIDISTOMP V2.0 / 70CDR)
+      // Only bind generic "usb midi" ports as Chocolate Plus after receiving an authentic F0 00 32 45 58 reply
+      if (!this.chocolateOut && genericOutputs.length > 0 && genericInputs.length > 0) {
+        const probe = buildChocolateDiscoverySysex();
+        for (const outCandidate of genericOutputs) {
+          let verifiedInput: MidiInputLike | null = null as MidiInputLike | null;
+          await new Promise<void>((resolve) => {
+            const tempHandlers: Array<() => void> = [];
+            const timer = setTimeout(() => {
+              for (const clean of tempHandlers) clean();
+              resolve();
+            }, 150);
+
+            for (const inCandidate of genericInputs) {
+              inCandidate.onmidimessage = (ev: { data: Uint8Array }) => {
+                const d = ev.data;
+                if (
+                  d.length >= 5 &&
+                  d[0] === 0xf0 &&
+                  d[1] === 0x00 &&
+                  d[2] === 0x32 &&
+                  d[3] === 0x45 &&
+                  d[4] === 0x58
+                ) {
+                  verifiedInput = inCandidate;
+                  clearTimeout(timer);
+                  for (const clean of tempHandlers) clean();
+                  resolve();
+                }
+              };
+              tempHandlers.push(() => {
+                if (inCandidate !== verifiedInput) inCandidate.onmidimessage = null;
+              });
+            }
+
+            try {
+              outCandidate.send(probe);
+            } catch {
+              clearTimeout(timer);
+              for (const clean of tempHandlers) clean();
+              resolve();
+            }
+          });
+
+          const matchedIn = verifiedInput;
+          if (matchedIn) {
+            this.chocolateOut = outCandidate;
+            this.chocolateIn = matchedIn;
+            matchedIn.onmidimessage = (ev: { data: Uint8Array }) =>
+              this.handleChocolateInput(ev.data);
+            break;
+          }
+        }
+      }
+
+      access.onstatechange = (ev: any) => {
+        const port = ev?.port;
+        if (!port || port.state !== 'disconnected') return;
+        let changed = false;
+        if (this.zoomOut && (port === this.zoomOut || port.id === this.zoomOut.id)) {
+          this.zoomOut = null;
+          changed = true;
+        }
+        if (this.zoomIn && (port === this.zoomIn || port.id === this.zoomIn.id)) {
+          this.zoomIn.onmidimessage = null;
+          this.zoomIn = null;
+          changed = true;
+        }
+        if (
+          this.chocolateOut &&
+          (port === this.chocolateOut || port.id === this.chocolateOut.id)
+        ) {
+          this.chocolateOut = null;
+          changed = true;
+        }
+        if (this.chocolateIn && (port === this.chocolateIn || port.id === this.chocolateIn.id)) {
+          this.chocolateIn.onmidimessage = null;
+          this.chocolateIn = null;
+          changed = true;
+        }
+        if (changed) this.notifyConnectionChange();
+      };
+
       if (this.zoomOut) {
         this.zoomOut.send(new Uint8Array([0xf0, 0x7e, 0x00, 0x06, 0x01, 0xf7]));
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, 0x58, 0x50, 0xf7]));
@@ -167,6 +289,7 @@ export class WebMidiService {
       }
 
       const status = this.getStatus();
+      this.notifyConnectionChange();
       const parts: string[] = [];
       if (status.zoomConnected) parts.push('Zoom MS-50G connected');
       if (status.chocolateConnected) parts.push('Chocolate Plus connected');
@@ -197,12 +320,29 @@ export class WebMidiService {
       if (data[6] === 0x58 || data[6] === 0x61) {
         this.zoomModelId = data[6];
       }
+      return;
+    }
+    // 146-byte Patch Dump response: F0 52 00 <modelId> 28 ... F7
+    if (
+      data.length === MIDI_PATCH_BYTES &&
+      data[0] === 0xf0 &&
+      data[1] === 0x52 &&
+      data[4] === 0x28 &&
+      this.pendingZoomDumpResolve
+    ) {
+      const resolve = this.pendingZoomDumpResolve;
+      this.pendingZoomDumpResolve = null;
+      resolve(new Uint8Array(data));
     }
   }
 
   private handleChocolateInput(data: Uint8Array): void {
-    // Control Change message 0xB0..0xBF: [status, ccNumber, ccValue]
+    // Control Change message 0xB0..0xBF: filter strictly to Expression CCs (CC 16 configured, CC 11 factory)
     if (data.length >= 3 && (data[0] & 0xf0) === 0xb0) {
+      const ccNum = data[1] & 0x7f;
+      if (ccNum !== 16 && ccNum !== 11) {
+        return;
+      }
       const ccValue = data[2] & 0x7f;
       for (const listener of this.expressionListeners) {
         listener(ccValue);
@@ -210,11 +350,32 @@ export class WebMidiService {
     }
   }
 
-  /** Sends live MIDISTOMP CC preview when the user clicks a Scene or turns a pedal knob on screen. */
+  /** Sends live MIDISTOMP PC/CC preview when changing rigs, scenes, solo trim, or pedal knobs. */
+  public sendRigSelectPreview(rigIndex: number): void {
+    if (!this.zoomOut) return;
+    const pc = Math.max(0, Math.min(11, Math.trunc(rigIndex)));
+    try {
+      this.zoomOut.send([0xc0, pc]);
+    } catch {
+      // Ignore transient live-preview drops
+    }
+  }
+
   public sendScenePreview(scene: SceneId): void {
     if (!this.zoomOut) return;
     try {
       this.zoomOut.send([0xb0, 15, SCENE_CC_VALUES[scene]]);
+    } catch {
+      // Ignore transient live-preview drops
+    }
+  }
+
+  public sendTrimPreview(trimIdx: number): void {
+    if (!this.zoomOut) return;
+    const clamped = Math.max(0, Math.min(24, Math.round(trimIdx)));
+    const ccVal = Math.max(0, Math.min(127, Math.round((clamped / 24) * 127)));
+    try {
+      this.zoomOut.send([0xb0, 17, ccVal]);
     } catch {
       // Ignore transient live-preview drops
     }
@@ -251,8 +412,92 @@ export class WebMidiService {
   }
 
   /**
+   * Reads all 48 managed patches (Rigs 01..12 + Shadow B/C/D) from a connected Zoom MS-50G
+   * using Program Change + `0x29` patch dump requests, preserving custom `.ZDL` fxids.
+   */
+  public async readAllFromHardware(
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number = 25,
+    timeoutMs: number = 600
+  ): Promise<{ ok: boolean; rigs?: GigRig[]; userMessage: string }> {
+    if (!this.zoomOut || !this.zoomIn) {
+      return {
+        ok: false,
+        userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB before reading rigs.',
+      };
+    }
+
+    const raw48: Uint8Array[] = [];
+    for (let idx = 0; idx < 48; idx++) {
+      const rigLabel =
+        idx < 12
+          ? `Gig Rig ${String(idx + 1).padStart(2, '0')}`
+          : `Rig ${String(Math.floor((idx - 12) / 3) + 1).padStart(2, '0')} Scene ${['B', 'C', 'D'][(idx - 12) % 3]}`;
+
+      onProgress({
+        phase: 'backup',
+        current: idx + 1,
+        total: 48,
+        message: `Reading ${rigLabel} from Zoom MS-50G...`,
+      });
+
+      try {
+        const dumpPromise = new Promise<Uint8Array>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (this.pendingZoomDumpResolve) {
+              this.pendingZoomDumpResolve = null;
+              reject(new Error(`Timed out waiting for MS-50G reply on slot ${idx + 1}`));
+            }
+          }, timeoutMs);
+          this.pendingZoomDumpResolve = (bytes) => {
+            clearTimeout(timer);
+            resolve(bytes);
+          };
+        });
+
+        this.zoomOut.send([0xc0, idx]);
+        await sleep(delayMs);
+        this.zoomOut.send(buildPatchRequestSysex(this.zoomModelId));
+
+        const sysex146 = await dumpPromise;
+        raw48.push(decodePatchReadSysex(sysex146));
+      } catch (err) {
+        onProgress({
+          phase: 'error',
+          current: idx,
+          total: 48,
+          message: `Failed reading ${rigLabel} from MS-50G (${(err as Error).message}).`,
+        });
+        return {
+          ok: false,
+          userMessage: `Could not read ${rigLabel} from MS-50G (${(err as Error).message}).`,
+        };
+      }
+    }
+
+    try {
+      this.zoomOut.send([0xc0, 0]);
+    } catch {
+      // Ignore post-read PC return failure
+    }
+
+    const rigs = decompile48PatchesToRigs(raw48);
+    onProgress({
+      phase: 'done',
+      current: 48,
+      total: 48,
+      message: 'Loaded all 12 Gig Rigs (48 patches) from your Zoom MS-50G!',
+    });
+    return {
+      ok: true,
+      rigs,
+      userMessage: 'Loaded all 12 Gig Rigs (including any Custom Pedals) from your Zoom MS-50G!',
+    };
+  }
+
+  /**
    * Writes all 48 managed patches (12 Gig Rigs + 36 Shadow Snapshots) to the Zoom MS-50G
-   * and pushes the Single-Bank + Salfini VP-1 Expression config to the Chocolate Plus.
+   * and pushes the complete Single-Bank + Short/Long + Salfini VP-1 Expression config to Chocolate Plus.
    */
   public async syncAllToHardware(
     rigs: GigRig[],
@@ -274,13 +519,16 @@ export class WebMidiService {
     let step = 0;
 
     if (this.zoomOut) {
+      let currentIdx = 0;
       try {
-        // Enable parameter/patch write mode
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
 
         for (let idx = 0; idx < patches48.length; idx++) {
-          const rigDisplay = idx < 12 ? `Gig Rig ${String(idx + 1).padStart(2, '0')}` : `Scene Memory #${idx + 1}`;
+          currentIdx = idx;
+          const rigNum = idx < 12 ? idx + 1 : Math.floor((idx - 12) / 3) + 1;
+          const sceneName = idx < 12 ? 'Scene A' : `Scene ${['B', 'C', 'D'][(idx - 12) % 3]}`;
+          const rigDisplay = `Rig ${String(rigNum).padStart(2, '0')} (${sceneName})`;
           onProgress({
             phase: 'ms50g',
             current: step + 1,
@@ -288,7 +536,6 @@ export class WebMidiService {
             message: `Syncing ${rigDisplay} to Zoom MS-50G...`,
           });
 
-          // 1. Select memory slot 0..47, 2. Push 146B patch buffer (0x28), 3. Commit to NVRAM (0x32)
           this.zoomOut.send([0xc0, idx]);
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
@@ -298,40 +545,62 @@ export class WebMidiService {
           step++;
         }
 
-        // Return pedal neatly to Gig Rig 01 (Scene A) ready to play
         this.zoomOut.send([0xc0, 0]);
       } catch (err) {
-        const failedRig = Math.min(12, (step % 12) + 1);
+        const failedRig =
+          currentIdx < 12 ? currentIdx + 1 : Math.floor((currentIdx - 12) / 3) + 1;
+        const failedScene =
+          currentIdx < 12 ? 'Scene A' : `Scene ${['B', 'C', 'D'][(currentIdx - 12) % 3]}`;
+        this.zoomOut = null;
+        if (this.zoomIn) this.zoomIn.onmidimessage = null;
+        this.zoomIn = null;
+        this.notifyConnectionChange();
+
+        const msg = `USB connection dropped while syncing MS-50G on Rig ${String(failedRig).padStart(2, '0')} (${failedScene}). Check your Mini-USB cable and click Sync All again.`;
         onProgress({
           phase: 'error',
           current: step,
           total: totalSteps,
-          message: `USB connection dropped while syncing MS-50G (stopped around Rig ${failedRig}).`,
+          message: msg,
         });
         return {
           ok: false,
-          userMessage: `USB connection dropped while syncing MS-50G (${(err as Error).message}). Check your Mini-USB cable and click Sync All again.`,
+          userMessage: `${msg} (${(err as Error).message})`,
         };
       }
     }
 
     if (this.chocolateOut) {
+      let pktIdx = 0;
       try {
         for (let i = 0; i < chocoPackets.length; i++) {
+          pktIdx = i;
           onProgress({
             phase: 'chocolate',
             current: step + 1,
             total: totalSteps,
-            message: 'Configuring Chocolate Plus switches & Salfini VP-1 Expression port...',
+            message: 'Configuring Chocolate Plus footswitches & Salfini VP-1 Expression port...',
           });
           this.chocolateOut.send(chocoPackets[i]);
           await sleep(delayMs);
           step++;
         }
       } catch (err) {
+        this.chocolateOut = null;
+        if (this.chocolateIn) this.chocolateIn.onmidimessage = null;
+        this.chocolateIn = null;
+        this.notifyConnectionChange();
+
+        const msg = `USB connection dropped while configuring Chocolate Plus (step ${pktIdx + 1}/${chocoPackets.length}). Make sure its side switch is set to U and click Sync All again.`;
+        onProgress({
+          phase: 'error',
+          current: step,
+          total: totalSteps,
+          message: msg,
+        });
         return {
           ok: false,
-          userMessage: `USB connection dropped while configuring Chocolate Plus (${(err as Error).message}). Make sure its side switch is set to U while plugged into the PC.`,
+          userMessage: `${msg} (${(err as Error).message})`,
         };
       }
     }

@@ -21,12 +21,54 @@ def test_build_scene_zdl_structure(tmp_path: Path):
     blob = build_scene_zdl(out, cl6x_path=None)
     assert out.exists() and len(blob) > 0x4C + 64
     assert SCENE_GID == 0x02
-    assert blob[0x4C:0x50] == b"\x7fELF"
-    elf_machine = struct.unpack_from("<H", blob, 0x4C + 18)[0]
-    assert elf_machine == 140  # EM_TI_C6000 = 140 (0x8C)
-    assert b"SCENE" in blob[:0x4C]
-    fxid_in_hdr = struct.unpack_from("<H", blob, 0x08)[0]
-    assert fxid_in_hdr == SCENE_FXID
+
+    # Authentic Zoom ZDL 0x4C header layout (ZoomMultistompZDL zdl.py / linker.py)
+    assert blob[0:4] == b"\x00\x00\x00\x00"
+    assert blob[4:8] == b"SIZE"
+    size_payload, header_size, elf_size = struct.unpack_from("<III", blob, 8)
+    assert size_payload == 8
+    assert header_size == 0x38
+    assert len(blob) == 0x4C + elf_size
+    assert blob[20:24] == b"INFO"
+    assert blob[28:60] == b"ZOOM EFFECT DLL SYSTEM VER 1.00\x00"
+    assert blob[60] == SCENE_GID
+    assert struct.unpack_from("<H", blob, 64)[0] == SCENE_FXID
+
+    # Authentic TI C674x EABI ET_DYN ELF with PT_DYNAMIC + Dll_SCENE export
+    elf = blob[0x4C:]
+    assert elf[0:4] == b"\x7fELF"
+    assert elf[7] == 0x40  # ELFOSABI_C6000_EABI
+    e_type, e_machine = struct.unpack_from("<HH", elf, 16)
+    assert e_type == 3  # ET_DYN
+    assert e_machine == 140  # EM_TI_C6000
+    assert b"Dll_SCENE\x00" in elf
+    assert b"ZDL_FLT_SCENE.out\x00" in elf
+    assert b"SonicStomp\x00" in elf
+    # Fallback C6740 .audio code must not just load & immediately bnop b3,5 without magic shuttle or multiply
+    assert len(elf) > 512
+    # Magic shuttle + TRIM multiply loop present in fallback audio stub
+    from firmware.scene_zdl.build_zdl import PREASSEMBLED_C6740_AUDIO_STUB
+    assert len(PREASSEMBLED_C6740_AUDIO_STUB) >= 64
+
+
+def test_extract_obj_audio_never_embeds_raw_elf_header(tmp_path: Path):
+    """If a TI .obj (ET_REL) is linked, only relocatable section code enters .audio, never \\x7fELF."""
+    from firmware.scene_zdl.build_zdl import PREASSEMBLED_C6740_AUDIO_STUB, extract_obj_sections
+
+    # Synthesize a minimal ET_REL .obj containing a .audio PROGBITS section
+    shstr = b"\x00.audio\x00.shstrtab\x00"
+    audio_code = PREASSEMBLED_C6740_AUDIO_STUB[:32]
+    shoff = 52 + len(audio_code) + len(shstr)
+    ehdr = struct.pack("<16sHHIIIIIHHHHHH", b"\x7fELF\x01\x01\x01\x40" + b"\x00" * 8, 1, 140, 1, 0, 0, shoff, 0, 52, 32, 0, 40, 3, 2)
+    sh0 = struct.pack("<IIIIIIIIII", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    sh1 = struct.pack("<IIIIIIIIII", 1, 1, 6, 0, 52, len(audio_code), 0, 0, 32, 0)
+    sh2 = struct.pack("<IIIIIIIIII", 8, 3, 0, 0, 52 + len(audio_code), len(shstr), 0, 0, 1, 0)
+    obj_path = tmp_path / "scene.obj"
+    obj_path.write_bytes(ehdr + audio_code + shstr + sh0 + sh1 + sh2)
+
+    extracted_audio, _ = extract_obj_sections(obj_path)
+    assert not extracted_audio.startswith(b"\x7fELF")
+    assert extracted_audio == audio_code
 
 
 def test_dsp_smoothing_no_click_and_bypass_passthrough():

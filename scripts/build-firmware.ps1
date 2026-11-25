@@ -16,10 +16,11 @@ Write-Host "=== [1/3] Building dist\SCENE.ZDL (fxid 0x0195) ===" -ForegroundColo
 $Cl6x = "C:\ti\ccs\tools\compiler\ti-cgt-c6000_8.5.0.LTS\bin\cl6x.exe"
 if (Test-Path $Cl6x) {
     Write-Host "Found TI C6000 compiler at $Cl6x" -ForegroundColor Green
+    & $PythonExe -m firmware.scene_zdl.build_zdl --cl6x $Cl6x
 } else {
     Write-Host "TI cl6x not found at default path; using verified pre-assembled C6740 audio stub." -ForegroundColor Yellow
+    & $PythonExe -m firmware.scene_zdl.build_zdl
 }
-& $PythonExe -m firmware.scene_zdl.build_zdl
 
 Write-Host "`n=== [2/3] Generating MIDISTOMP V2.0 Scene Engine Patches ===" -ForegroundColor Cyan
 & $PythonExe -m firmware.midistomp_patch.generate_patches

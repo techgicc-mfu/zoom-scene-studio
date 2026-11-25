@@ -38,6 +38,13 @@ export const PedalBoard: React.FC = () => {
 
         const enabledDiffers = activeScene !== 'A' && slot.enabled !== baseSlotA.enabled;
 
+        // Determine raw indices to show for uncatalogued custom pedals (minimum 3, plus any active >2)
+        const rawVisibleIndices = def
+          ? []
+          : [0, 1, 2, 3, 4, 5, 6, 7, 8].filter(
+              (idx) => idx < 3 || (slot.params[idx] ?? 0) !== 0 || (baseSlotA.params[idx] ?? 0) !== 0
+            );
+
         return (
           <div
             key={pedalIdx}
@@ -64,32 +71,36 @@ export const PedalBoard: React.FC = () => {
               </button>
             </div>
 
-            {/* Model Picker or Custom Uncatalogued Fallback */}
-            {def ? (
-              <select
-                aria-label={`Select effect model for Pedal ${pedalIdx + 1}`}
-                className="stompbox-model-select"
-                value={slot.fxid}
-                onChange={(e) => setPedalModel(pedalIdx, Number(e.target.value))}
-              >
-                {CATEGORY_ORDER.map((cat) => (
-                  <optgroup key={cat} label={CATEGORY_META[cat].label}>
-                    {EFFECT_CATALOG.filter((fx) => fx.category === cat).map((fx) => (
-                      <option key={fx.fxid} value={fx.fxid}>
-                        {fx.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            ) : (
+            {/* Model Picker: keeps Custom Pedal (#fxid) selectable & swappable to any catalog effect */}
+            {!def && (
               <div className="custom-pedal-banner">
                 <strong>Custom Pedal (#{slot.fxid})</strong>
                 <span className="custom-pedal-sub">
-                  Preserved safely from your MS-50G
+                  Preserved safely from your MS-50G (swap below anytime)
                 </span>
               </div>
             )}
+            <select
+              aria-label={`Select effect model for Pedal ${pedalIdx + 1}`}
+              className="stompbox-model-select"
+              value={slot.fxid}
+              onChange={(e) => setPedalModel(pedalIdx, Number(e.target.value))}
+            >
+              {!def && (
+                <option value={slot.fxid}>
+                  Custom Pedal (#{slot.fxid}) — Preserved
+                </option>
+              )}
+              {CATEGORY_ORDER.map((cat) => (
+                <optgroup key={cat} label={CATEGORY_META[cat].label}>
+                  {EFFECT_CATALOG.filter((fx) => fx.category === cat).map((fx) => (
+                    <option key={fx.fxid} value={fx.fxid}>
+                      {fx.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
 
             {/* Knobs / Sliders */}
             <div className="stompbox-knobs">
@@ -120,7 +131,7 @@ export const PedalBoard: React.FC = () => {
                         <input
                           type="range"
                           min={pSpec.min}
-                          max={pSpec.max}
+                          max={Math.max(pSpec.max, val)}
                           value={val}
                           aria-label={`${def.shortName} ${pSpec.name}`}
                           onChange={(e) => setPedalParam(pedalIdx, pIdx, Number(e.target.value))}
@@ -133,12 +144,13 @@ export const PedalBoard: React.FC = () => {
                       </div>
                     );
                   })
-                : [0, 1, 2].map((pIdx) => {
+                : rawVisibleIndices.map((pIdx) => {
                     const val = slot.params[pIdx] ?? 0;
                     const valA = baseSlotA.params[pIdx] ?? 0;
                     const paramDiffers = activeScene !== 'A' && val !== valA;
+                    const safeMax = Math.max(150, val, valA);
                     return (
-                      <div key={pIdx} className="knob-row">
+                      <div key={pIdx} className={`knob-row ${paramDiffers ? 'knob-row-changed' : ''}`}>
                         <div className="knob-label-line">
                           <span className="knob-name">
                             Knob {pIdx + 1}
@@ -149,8 +161,9 @@ export const PedalBoard: React.FC = () => {
                         <input
                           type="range"
                           min={0}
-                          max={150}
+                          max={safeMax}
                           value={val}
+                          aria-label={`Custom #${slot.fxid} Knob ${pIdx + 1}`}
                           onChange={(e) => setPedalParam(pedalIdx, pIdx, Number(e.target.value))}
                         />
                       </div>

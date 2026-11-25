@@ -8,6 +8,9 @@ const BANK_B_LIST_OFF = 0x051;  // Long-press (or Bank B) 16 x 5-byte list
 
 const STEP_MODE_SHORT_LONG = 0x04;
 const ENTRY_TYPE_CC = 0x01;
+const ADV_CUSTOM_START = 93;
+const ADV_CUSTOM_BLOCK = 417;
+const ADV_CUSTOM_SWITCHES = 4;
 
 export const SCENE_CC_VALUES = {
   A: 0,
@@ -20,11 +23,22 @@ export function buildChocolateDiscoverySysex(): Uint8Array {
   return new Uint8Array([0xf0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7f, 0xf7]);
 }
 
+/**
+ * Computes the empirically verified OpenChocolate checksum constant `K` for any blob address,
+ * covering system settings (0..4, 23637..23642) and all bytes inside Advanced Custom switch blocks A..D.
+ */
 function constantKForAddress(blobAddr: number): number {
-  if (blobAddr === 510 || blobAddr === 1344) return 0x38b;
-  if (blobAddr === 927) return 0x18b;
+  const rel = blobAddr - ADV_CUSTOM_START;
+  if (rel >= 0 && rel < 8 * ADV_CUSTOM_BLOCK) {
+    const sw = Math.floor(rel / ADV_CUSTOM_BLOCK) % ADV_CUSTOM_SWITCHES;
+    return [0x28a, 0x38b, 0x18b, 0x38b][sw];
+  }
   if (blobAddr >= 23637 && blobAddr <= 23645) return 0x20b;
   return 0x28a;
+}
+
+export function midiCodeAddr(page: number, sw: number, bank: 0 | 1, slot: number, field: number): number {
+  return ADV_CUSTOM_START + page * 1668 + sw * ADV_CUSTOM_BLOCK + 1 + bank * 80 + slot * 5 + field;
 }
 
 /**
@@ -60,29 +74,79 @@ export function buildChocolateWrite21(blobAddr: number, value: number): Uint8Arr
 }
 
 /**
- * Live USB-MIDI `09 49` configuration sequence configuring the Chocolate Plus for Scene Studio:
- * - Operating Mode = 0x03 (Advanced Custom)
- * - TRS Pedal Jack = 0x00 (Expression Pedal mode for Salfini VP-1)
- * - MIDI Channel   = 0x00 (Channel 1)
- * - Expression CC  = 16 (Slot 1 SCENE.ZDL Knob 2 = EXPR)
- * - Max Groups     = 0x00 (1 single active bank `b1`, zero bank confusion)
- * - Switches A..D  = 0x04 (Step short / Step long)
+ * Builds the captured 111-byte `09 41` bulk bank-clear SysEx frame that wipes all 16 slots
+ * in a switch's Short (`bank=0`) or Long (`bank=1`) action list cleanly before writing slot 0.
  */
-export function buildChocolateLiveConfigPackets(): Uint8Array[] {
-  return [
-    buildChocolateWrite21(0, 0x03),     // Mode: Advanced Custom
-    buildChocolateWrite21(1, 0x00),     // TRS Jack: Expression Pedal
-    buildChocolateWrite21(2, 0x00),     // Global MIDI Channel 1 (0-indexed)
-    buildChocolateWrite21(3, 0x01),     // Custom/Exp latch
-    buildChocolateWrite21(4, 16),       // Expression CC = 16 (SCENE.ZDL EXPR)
-    buildChocolateWrite21(23639, 0x00), // Max group count = 1 (b1 only)
-    buildChocolateWrite21(23640, 0x00), // Advanced Custom Page 0
-    buildChocolateWrite21(23642, 0x00), // Expression polarity normal
-    buildChocolateWrite21(93, STEP_MODE_SHORT_LONG),   // Footswitch A: Short/Long
-    buildChocolateWrite21(510, STEP_MODE_SHORT_LONG),  // Footswitch B: Short/Long
-    buildChocolateWrite21(927, STEP_MODE_SHORT_LONG),  // Footswitch C: Short/Long
-    buildChocolateWrite21(1344, STEP_MODE_SHORT_LONG), // Footswitch D: Short/Long
+export function buildChocolateBankClear(page: number, sw: number, bank: 0 | 1): Uint8Array {
+  const addr = midiCodeAddr(page, sw, bank, 0, 0);
+  const d = [
+    0x00, 0x32, 0x09, 0x41,
+    0x05, 0x00, 0x00, 0x02,
+    addr & 0x7f, (addr >>> 7) & 0x7f, (addr >>> 14) & 0x7f, 0x00,
+    0x00, 0x0a,
+    ...new Array<number>(93).fill(0),
   ];
+  const k = 0x400 - 0x50 * bank;
+  const sum = d.reduce((acc, b) => acc + b, 0);
+  const x = (k - sum) & 0x3fff;
+  return new Uint8Array([0xf0, ...d, x & 0x7f, (x >>> 7) & 0x7f, 0xf7]);
+}
+
+/**
+ * Complete USB-MIDI `09 49` + `09 41` configuration sequence configuring the Chocolate Plus for Scene Studio:
+ * - Operating Mode = 0x03 (Advanced Custom), Page 0 (`usrPage=0`), `maxGroupCount=0` (1 active bank `b1`)
+ * - TRS Pedal Jack = 0x00 (Expression Pedal mode for Salfini VP-1) on MIDI Ch 1, CC 16 (`SCENE.ZDL` EXPR)
+ * - Switches A..D = 0x04 (Step short / Step long)
+ * - Clears & programs Short Tap A..D (`CC 15 = 0, 42, 84, 127`) and Long Hold A..D (`CC 80=127, 81=127, 74=127, 82=127`)
+ */
+export function buildChocolateLiveConfigPackets(midiChannel: number = 1): Uint8Array[] {
+  const ch0 = Math.max(0, Math.min(15, midiChannel - 1));
+  const packets: Uint8Array[] = [
+    buildChocolateWrite21(0, 0x03),      // Mode: Advanced Custom
+    buildChocolateWrite21(1, 0x00),      // TRS Jack: Expression Pedal
+    buildChocolateWrite21(2, ch0),       // Global MIDI Channel
+    buildChocolateWrite21(3, 0x01),      // Custom/Exp latch
+    buildChocolateWrite21(4, 16),        // Expression CC = 16 (SCENE.ZDL EXPR)
+    buildChocolateWrite21(23639, 0x00),  // Max group count = 1 (b1 only)
+    buildChocolateWrite21(23640, 0x00),  // Advanced Custom Page 0
+    buildChocolateWrite21(23642, 0x00),  // Expression polarity normal
+  ];
+
+  const shortScenes = [0, 42, 84, 127];
+  const longHoldCcs: Array<[number, number]> = [
+    [80, 127], // Hold A: Prev Rig
+    [81, 127], // Hold B: Next Rig
+    [74, 127], // Hold C: Silent Tuner toggle
+    [82, 127], // Hold D: Tap Tempo
+  ];
+
+  for (let sw = 0; sw < 4; sw++) {
+    // 1. Switch step behavior = Short Tap / Long Hold (0x04)
+    packets.push(buildChocolateWrite21(ADV_CUSTOM_START + sw * ADV_CUSTOM_BLOCK, STEP_MODE_SHORT_LONG));
+
+    // 2. Wipe old Short (Bank A) & Long (Bank B) slots cleanly
+    packets.push(buildChocolateBankClear(0, sw, 0));
+    packets.push(buildChocolateBankClear(0, sw, 1));
+
+    // 3. Program Short Tap slot 0 (fields 1..4 first, enabled=1 last per OpenChocolate order)
+    const shortBase = midiCodeAddr(0, sw, 0, 0, 0);
+    packets.push(buildChocolateWrite21(shortBase + 1, ch0));
+    packets.push(buildChocolateWrite21(shortBase + 2, ENTRY_TYPE_CC));
+    packets.push(buildChocolateWrite21(shortBase + 3, 15));
+    packets.push(buildChocolateWrite21(shortBase + 4, shortScenes[sw]));
+    packets.push(buildChocolateWrite21(shortBase + 0, 0x01));
+
+    // 4. Program Long Hold slot 0
+    const longBase = midiCodeAddr(0, sw, 1, 0, 0);
+    const [holdCc, holdVal] = longHoldCcs[sw];
+    packets.push(buildChocolateWrite21(longBase + 1, ch0));
+    packets.push(buildChocolateWrite21(longBase + 2, ENTRY_TYPE_CC));
+    packets.push(buildChocolateWrite21(longBase + 3, holdCc));
+    packets.push(buildChocolateWrite21(longBase + 4, holdVal));
+    packets.push(buildChocolateWrite21(longBase + 0, 0x01));
+  }
+
+  return packets;
 }
 
 function writeCcEntry(buf: Uint8Array, offset: number, channel0: number, cc: number, val: number): void {

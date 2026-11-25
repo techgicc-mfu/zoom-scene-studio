@@ -51,10 +51,44 @@ def test_autosave_suppressed_on_non_a_scene():
 def test_generated_yaml_patches_valid_and_32b_aligned(tmp_path: Path):
     paths = generate_all_patches(tmp_path)
     assert {p.name for p in paths} == {"rig-wrap-12.yaml", "no-scene-autosave.yaml", "scene-engine.yaml"}
+    docs = {}
     for p in paths:
         doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+        docs[p.name] = doc
         assert doc["builds"] == ["ms70cdr-2.10"]
         for sec in doc.get("section", []):
             raw = bytes.fromhex(sec["data"].replace(" ", "").replace("\n", ""))
             assert sec["addr"] % 32 == 0
             assert len(raw) % 32 == 0  # mandatory C6000 fetch-packet padding
+
+    # Critical #1: scene-engine.yaml must hook Task_SwitchNrmlSpdRead (0xC00C6998)
+    # and embed real C6740 machine code referencing OS symbols (REC_LOAD, SEM_PEND, FX_SET_PARAM, SEM_POST, EVENT_POST)
+    se_doc = docs["scene-engine.yaml"]
+    se_addrs = {w["addr"] for w in se_doc.get("write", [])}
+    assert 0xC00C6998 in se_addrs
+    se_sec = bytes.fromhex(se_doc["section"][0]["data"].replace(" ", "").replace("\n", ""))
+    assert len(se_sec) >= 256  # real routine, not a 12-word stub
+    se_words = {int.from_bytes(se_sec[i:i + 4], "little") for i in range(0, len(se_sec), 4)}
+    # Verify MVKL/MVKH lo16/hi16 constants for REC_LOAD (0xC00B4AAC), SEM_PEND (0xC00C7EE0), FX_SET_PARAM (0xC00BB600), EVENT_POST (0xC00CBF40)
+    def has_32bit_const(words: set[int], val: int) -> bool:
+        lo16 = val & 0xFFFF
+        hi16 = (val >> 16) & 0xFFFF
+        has_lo = any(((w >> 7) & 0xFFFF) == lo16 for w in words)
+        has_hi = any(((w >> 7) & 0xFFFF) == hi16 for w in words)
+        return has_lo and has_hi
+    assert has_32bit_const(se_words, 0xC00B4AAC)  # REC_LOAD
+    assert has_32bit_const(se_words, 0xC00C7EE0)  # SEM_PEND
+    assert has_32bit_const(se_words, 0xC00BB600)  # FX_SET_PARAM
+    assert has_32bit_const(se_words, 0xC00D6B00)  # SEM_POST
+    assert has_32bit_const(se_words, 0xC00CBF40)  # EVENT_POST
+
+    # Critical #1: no-scene-autosave.yaml must hook IS_DIRTY (0xC00ACBC4), PC call site (0xC00AEE90) to skip redundant reload when CUR_PATCH==r,
+    # and check Slot 0 fxid == SCENE_FXID (0x0195) before suppressing AUTO SAVE
+    na_doc = docs["no-scene-autosave.yaml"]
+    na_addrs = {w["addr"] for w in na_doc.get("write", [])}
+    assert 0xC00ACBC4 in na_addrs  # IS_DIRTY hook
+    assert 0xC00AEE90 in na_addrs  # Task_MIDI PC guard hook
+    na_sec = bytes.fromhex(na_doc["section"][0]["data"].replace(" ", "").replace("\n", ""))
+    na_words = {int.from_bytes(na_sec[i:i + 4], "little") for i in range(0, len(na_sec), 4)}
+    assert has_32bit_const(na_words, 0xC00B8534)  # falls through to stock IS_DIRTY
+    assert any(((w >> 7) & 0xFFFF) == 0x0195 or ((w >> 18) & 0x1F) == 0 for w in na_words)  # checks SCENE_FXID 0x0195

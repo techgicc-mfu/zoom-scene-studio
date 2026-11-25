@@ -13,6 +13,8 @@ describe('Scene Studio full app shell & Setup Guide', () => {
     expect(screen.getByText(/MS-50G Scene Studio/i)).toBeInTheDocument();
     expect(screen.getByText(/Classic Rock Plexi/i)).toBeInTheDocument();
     expect(screen.getByText(/Salfini VP-1 Expression Pedal Sweeps/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Read from MS-50G/i })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /Auto-backup/i })).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /Setup Guide/i }));
     expect(screen.getByText(/Wireless MIDI-B Host Mode/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download \.fcp Preset/i })).toBeInTheDocument();

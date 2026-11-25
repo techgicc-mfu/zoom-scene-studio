@@ -13,6 +13,7 @@ import './index.css';
 export const App: React.FC = () => {
   const rigs = useRigStore((s) => s.rigs);
   const setLiveFootCc = useRigStore((s) => s.setLiveFootCc);
+  const loadRigsFromPedal = useRigStore((s) => s.loadRigsFromPedal);
 
   const [zoomConnected, setZoomConnected] = useState(false);
   const [chocolateConnected, setChocolateConnected] = useState(false);
@@ -23,10 +24,17 @@ export const App: React.FC = () => {
   const [guideOpen, setGuideOpen] = useState(false);
 
   useEffect(() => {
-    const unsub = webMidiService.onExpressionSweep((ccVal) => {
+    const unsubExp = webMidiService.onExpressionSweep((ccVal) => {
       setLiveFootCc(ccVal);
     });
-    return unsub;
+    const unsubConn = webMidiService.onConnectionChange((status) => {
+      setZoomConnected(status.zoomConnected);
+      setChocolateConnected(status.chocolateConnected);
+    });
+    return () => {
+      unsubExp();
+      unsubConn();
+    };
   }, [setLiveFootCc]);
 
   const handleScanUsb = async () => {
@@ -34,6 +42,16 @@ export const App: React.FC = () => {
     const res = await webMidiService.connect();
     setZoomConnected(res.zoomConnected);
     setChocolateConnected(res.chocolateConnected);
+    setStatusMessage(res.userMessage);
+  };
+
+  const handleReadFromPedal = async () => {
+    const res = await webMidiService.readAllFromHardware((prog) => {
+      setSyncProgress(prog);
+    });
+    if (res.ok && res.rigs) {
+      loadRigsFromPedal(res.rigs);
+    }
     setStatusMessage(res.userMessage);
   };
 
@@ -52,6 +70,7 @@ export const App: React.FC = () => {
         statusMessage={statusMessage}
         syncProgress={syncProgress}
         onScanUsb={handleScanUsb}
+        onReadFromPedal={handleReadFromPedal}
         onOpenSetupGuide={() => setGuideOpen(true)}
         onSyncAll={handleSyncAll}
         onStatusToast={(msg) => {

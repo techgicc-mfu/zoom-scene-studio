@@ -12,6 +12,56 @@ import {
 
 const STORAGE_KEY = 'ms50g-scene-studio-v1';
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function isValidSlot(slot: unknown): slot is PedalSlotState {
+  if (!isRecord(slot)) return false;
+  return (
+    typeof slot.enabled === 'boolean' &&
+    typeof slot.fxid === 'number' &&
+    Number.isFinite(slot.fxid) &&
+    Array.isArray(slot.params) &&
+    slot.params.length === 9 &&
+    slot.params.every((p) => typeof p === 'number' && Number.isFinite(p))
+  );
+}
+
+export function isValidGigRigArray(data: unknown): data is GigRig[] {
+  if (!Array.isArray(data) || data.length !== 12) return false;
+  return data.every((rig) => {
+    if (!isRecord(rig)) return false;
+    if (typeof rig.name !== 'string') return false;
+    if (typeof rig.tempo !== 'number' || !Number.isFinite(rig.tempo)) return false;
+    if (!isRecord(rig.sceneNames) || !isRecord(rig.sceneTrims) || !isRecord(rig.scenes)) {
+      return false;
+    }
+    for (const sc of SCENE_IDS) {
+      if (typeof rig.sceneNames[sc] !== 'string') return false;
+      if (typeof rig.sceneTrims[sc] !== 'number' || !Number.isFinite(rig.sceneTrims[sc])) {
+        return false;
+      }
+      const chain = rig.scenes[sc];
+      if (!Array.isArray(chain) || chain.length !== 5 || !chain.every(isValidSlot)) {
+        return false;
+      }
+    }
+    const exp = rig.expression;
+    if (!isRecord(exp)) return false;
+    if (
+      typeof exp.targetSlot !== 'number' ||
+      typeof exp.targetParam !== 'number' ||
+      typeof exp.minPct !== 'number' ||
+      typeof exp.maxPct !== 'number' ||
+      typeof exp.curve !== 'string'
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function getSafeStorage(): Storage | null {
   if (typeof window === 'undefined') return null;
   const desc = Object.getOwnPropertyDescriptor(window, 'localStorage');
@@ -26,8 +76,8 @@ function loadSavedRigs(): GigRig[] {
     const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return createDefault12Rigs();
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length === 12) {
-      return parsed as GigRig[];
+    if (isValidGigRigArray(parsed)) {
+      return parsed;
     }
   } catch {
     // Fall back to clean defaults
@@ -66,6 +116,7 @@ export interface RigStoreState {
   setPedalModel: (pedalIdx0to4: number, newFxid: number) => void;
   setExpression: (patch: Partial<ExpressionConfig>) => void;
   loadTemplateIntoActiveRig: (templateId: string) => void;
+  loadRigsFromPedal: (rigs: GigRig[]) => void;
   setLiveFootCc: (ccVal: number) => void;
   exportRigPackJson: () => string;
   importRigPackJson: (jsonText: string) => { ok: boolean; error?: string };
@@ -82,6 +133,7 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
   selectRig: (rigIndex: number) => {
     const clamped = Math.max(0, Math.min(11, rigIndex));
     set({ activeRigIndex: clamped, activeScene: 'A' });
+    webMidiService.sendRigSelectPreview(clamped);
   },
 
   renameRig: (rigIndex: number, name: string) => {
@@ -107,9 +159,11 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
   setSceneTrim: (scene: SceneId, trimIdx: number) => {
     const { rigs, activeRigIndex } = get();
     const next = cloneRigs(rigs);
-    next[activeRigIndex].sceneTrims[scene] = Math.max(0, Math.min(24, Math.round(trimIdx)));
+    const clampedTrim = Math.max(0, Math.min(24, Math.round(trimIdx)));
+    next[activeRigIndex].sceneTrims[scene] = clampedTrim;
     persistRigs(next);
     set({ rigs: next });
+    webMidiService.sendTrimPreview(clampedTrim);
   },
 
   copySceneAToCurrent: () => {
@@ -157,6 +211,10 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
         params: [...defaultParams],
       };
     }
+    const maxParams = def?.params.length ?? 3;
+    if (rig.expression.targetSlot === pedalIdx0to4 + 2 && rig.expression.targetParam > maxParams) {
+      rig.expression.targetParam = 1;
+    }
     persistRigs(next);
     set({ rigs: next });
   },
@@ -182,6 +240,13 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
     set({ rigs: next, activeScene: 'A' });
   },
 
+  loadRigsFromPedal: (rigs: GigRig[]) => {
+    if (!isValidGigRigArray(rigs)) return;
+    const cloned = cloneRigs(rigs);
+    persistRigs(cloned);
+    set({ rigs: cloned, activeRigIndex: 0, activeScene: 'A' });
+  },
+
   setLiveFootCc: (ccVal: number) => {
     set({ liveFootCc: Math.max(0, Math.min(127, ccVal)) });
   },
@@ -202,11 +267,15 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
     try {
       const parsed = JSON.parse(jsonText);
       const list = Array.isArray(parsed) ? parsed : parsed?.rigs;
-      if (!Array.isArray(list) || list.length !== 12) {
-        return { ok: false, error: 'Rig Pack file must contain exactly 12 Gig Rigs.' };
+      if (!isValidGigRigArray(list)) {
+        return {
+          ok: false,
+          error:
+            'Rig Pack file is invalid or incomplete. Expected 12 complete Gig Rigs with Scenes A–D.',
+        };
       }
-      persistRigs(list as GigRig[]);
-      set({ rigs: list as GigRig[], activeRigIndex: 0, activeScene: 'A' });
+      persistRigs(list);
+      set({ rigs: cloneRigs(list), activeRigIndex: 0, activeScene: 'A' });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: `Invalid JSON file: ${(err as Error).message}` };
