@@ -49,9 +49,22 @@ def test_build_scene_zdl_structure(tmp_path: Path):
     # Magic shuttle + TRIM multiply loop present in fallback audio stub
     from firmware.scene_zdl.build_zdl import PREASSEMBLED_C6740_AUDIO_STUB
     assert len(PREASSEMBLED_C6740_AUDIO_STUB) >= 64
-    # Must NEVER carry the old unrelocated 0x80000430 pointer in .audio, and must export TRIM_LUT in .dynsym
+    # Must NEVER carry the old unrelocated 0x80000430 pointer in .audio, and must export TRIM_LUT + ABI symbols in .dynsym
     assert b"TRIM_LUT\x00" in elf
+    assert b"_Fx_FLT_SCENE_Coe\x00" in elf
+    assert b"__TI_STATIC_BASE\x00" in elf
     assert b"\x30\x04\x00\x80" not in PREASSEMBLED_C6740_AUDIO_STUB
+
+    # Verify verified C674x opcodes & register operands in PREASSEMBLED_C6740_AUDIO_STUB:
+    # +0x80/+0x84 must use ADDSP .L1 op=0x0218 (never broken 0x0098)
+    addsp_l = struct.unpack_from("<I", PREASSEMBLED_C6740_AUDIO_STUB, 0x80)[0]
+    addsp_r = struct.unpack_from("<I", PREASSEMBLED_C6740_AUDIO_STUB, 0x84)[0]
+    assert (addsp_l & 0xFFF) == 0x0218 and (addsp_r & 0xFFF) == 0x0218
+    # +0x94/+0x98/+0x9C must use ADD.L1 src2=5/6/9 with scst5=+4/+4/-1 (never ctx clobber)
+    w94, w98, w9c = struct.unpack_from("<III", PREASSEMBLED_C6740_AUDIO_STUB, 0x94)
+    assert ((w94 >> 18) & 0x1F) == 5 and ((w94 >> 13) & 0x1F) == 4 and ((w94 >> 23) & 0x1F) == 5
+    assert ((w98 >> 18) & 0x1F) == 6 and ((w98 >> 13) & 0x1F) == 4 and ((w98 >> 23) & 0x1F) == 6
+    assert ((w9c >> 18) & 0x1F) == 9 and ((w9c >> 13) & 0x1F) == 0x1F and ((w9c >> 23) & 0x1F) == 0
 
 
 def test_extract_obj_audio_never_embeds_raw_elf_header(tmp_path: Path):

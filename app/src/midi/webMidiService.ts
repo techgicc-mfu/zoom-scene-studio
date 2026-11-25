@@ -529,20 +529,20 @@ export class WebMidiService {
     };
   }
 
-  private waitForZoomAck(timeoutMs: number): Promise<void> {
+  private waitForZoomAck(timeoutMs: number): Promise<boolean> {
     if (!this.zoomIn || timeoutMs <= 0) {
-      return sleep(timeoutMs);
+      return sleep(timeoutMs).then(() => true);
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.pendingZoomAckResolve) {
           this.pendingZoomAckResolve = null;
-          resolve();
+          resolve(false);
         }
       }, timeoutMs);
       this.pendingZoomAckResolve = () => {
         clearTimeout(timer);
-        resolve();
+        resolve(true);
       };
     });
   }
@@ -572,6 +572,8 @@ export class WebMidiService {
 
     if (this.zoomOut) {
       let currentIdx = 0;
+      let ackedCount = 0;
+      const verifyAcks = Boolean(this.zoomIn && delayMs > 0);
       try {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
@@ -592,10 +594,28 @@ export class WebMidiService {
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
           await sleep(delayMs);
-          const ackWait =
-            this.zoomIn && delayMs > 0 ? this.waitForZoomAck(1500) : Promise.resolve();
+          const ackWait = verifyAcks ? this.waitForZoomAck(1500) : Promise.resolve(true);
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
-          await ackWait;
+          const acked = await ackWait;
+          if (acked) {
+            ackedCount++;
+          } else if (idx === 0) {
+            // If even the very first slot failed to ACK, fail fast instead of silently writing 47 more
+            try {
+              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+            } catch {
+              // ignore exit-editor error on hung pedal
+            }
+            const msg =
+              'Zoom MS-50G did not confirm saving Rig 01 (0/48 store ACKs). Verify SCENE.ZDL is updated on the pedal and click Scan USB before syncing again.';
+            onProgress({
+              phase: 'error',
+              current: step,
+              total: totalSteps,
+              message: msg,
+            });
+            return { ok: false, userMessage: msg };
+          }
           await sleep(delayMs);
           step++;
         }
@@ -603,6 +623,17 @@ export class WebMidiService {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
         await sleep(delayMs);
         this.zoomOut.send([0xc0, 0]);
+
+        if (verifyAcks && ackedCount < patches48.length) {
+          const msg = `Zoom MS-50G only confirmed ${ackedCount}/${patches48.length} patches. Unplug/re-scan USB and try Sync All again.`;
+          onProgress({
+            phase: 'error',
+            current: step,
+            total: totalSteps,
+            message: msg,
+          });
+          return { ok: false, userMessage: msg };
+        }
       } catch (err) {
         const failedRig =
           currentIdx < 12 ? currentIdx + 1 : Math.floor((currentIdx - 12) / 3) + 1;

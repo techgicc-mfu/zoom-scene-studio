@@ -218,9 +218,9 @@ def mpysp_m1(src2: int, src1: int, dst: int, cond: int = CREG_ALWAYS) -> int:
     return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | 0x0E00
 
 
-def addsp_l1(src2: int, src1: int, dst: int, cond: int = CREG_ALWAYS) -> int:
-    """ADDSP .L1 src1, src2, dst (single-precision float add on L1, TI SPRU733 op=0x098)."""
-    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | 0x0098
+def addsp_l1(src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """ADDSP .L1 src1, src2, dst (single-precision float add on L1; verified gain.obj +4C 0x00007218 -> op=0x0218)."""
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | ((x & 1) << 12) | 0x0218
 
 
 def pack_words_padded32(words: list[int]) -> bytes:

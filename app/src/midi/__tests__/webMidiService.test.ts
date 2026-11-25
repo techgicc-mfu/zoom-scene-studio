@@ -149,4 +149,25 @@ describe('WebMidiService resilience & two-way sync', () => {
     expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(48);
     expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
   });
+
+  it('fails loudly instead of claiming synced when MS-50G never sends 0x00 Store ACK', async () => {
+    const sentCmds: number[] = [];
+    const zoomIn: any = { name: 'ZOOM MS Series', onmidimessage: null };
+    const zoomOut: any = {
+      name: 'ZOOM MS Series',
+      send: (d: Uint8Array | number[]) => {
+        const arr = Array.from(d);
+        if (arr[0] === 0xf0 && arr[1] === 0x52) sentCmds.push(arr[4]);
+      },
+    };
+    const svc = new WebMidiService({ zoomOut, zoomIn, zoomModelId: 0x61 });
+    const rigs = Array.from({ length: 12 }, (_, i) => STARTER_TEMPLATES[0].createRig(i));
+    const events: any[] = [];
+    const res = await svc.syncAllToHardware(rigs, (p) => events.push(p), 1);
+    expect(res.ok).toBe(false);
+    expect(res.userMessage).toMatch(/0\/48 store ACKs/i);
+    expect(events[events.length - 1]?.phase).toBe('error');
+    expect(sentCmds.filter((c) => c === 0x32)).toHaveLength(1);
+    expect(sentCmds[sentCmds.length - 1]).toBe(0x51);
+  });
 });

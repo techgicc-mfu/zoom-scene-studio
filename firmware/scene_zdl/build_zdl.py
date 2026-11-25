@@ -184,9 +184,9 @@ def build_preassembled_audio_code(trim_lut_va: int = 0x800000BC) -> tuple[bytes,
         nop(3),                                      # +0x88
         stw_off(0, 0, 2, 6, 0),                      # +0x8C: outBuf[s] = a2
         stw_off(0, 0, 4, 6, 8),                      # +0x90: outBuf[s+8] = a4
-        add_lcst(0, 4, 5, 5),                        # +0x94: fxBuf += 4
-        add_lcst(0, 4, 6, 6),                        # +0x98: outBuf += 4
-        add_lcst(0, -1, 9, 0),                       # +0x9C: a0 = loop - 1
+        add_lcst(0, 5, 4, 5),                        # +0x94: fxBuf += 4 (src2=a5, scst5=+4, dst=a5)
+        add_lcst(0, 6, 4, 6),                        # +0x98: outBuf += 4 (src2=a6, scst5=+4, dst=a6)
+        add_lcst(0, 9, -1, 0),                       # +0x9C: a0 = loop - 1 (src2=a9, scst5=-1, dst=a0)
 
         # Fetch packet 5 (0xA0..0xBF): Loop check + epilogue return
         mv_l(0, 0, 9),                               # +0xA0: loop = a0
@@ -374,11 +374,11 @@ def _build_c6000_elf_payload(
     # --- 2. .const layout: Zoom RLE pic + TRIM_LUT + SonicStomp descriptor + effectTypeImageInfo + extra .const ---
     const_buf = bytearray(pic_rle)
 
-    # Embed TRIM_LUT at exact lut_va + extra .const + icon BMP reference
+    # Embed TRIM_LUT at exact lut_va + extra .const + 68B _Fx_FLT_<Name>_Coe
     const_buf.extend(b"\x00" * (lut_off - len(const_buf)))
     const_buf.extend(b"".join(struct.pack("<f", v) for v in TRIM_LUT))
     const_buf.extend(extra_const)
-    const_buf.extend(icon_bmp)
+    _ = icon_bmp
 
     desc_off = _align_up(len(const_buf), 4)
     const_buf.extend(b"\x00" * (desc_off - len(const_buf)))
@@ -449,6 +449,7 @@ def _build_c6000_elf_payload(
         info.extend(struct.pack("<I", knob_info_va))
     info.extend(b"\x00" * (212 - len(info)))
     const_buf.extend(info)
+    coe_va = info_va + 212
     const_buf.extend(b"\x00" * (const_pre_fardata - len(const_buf)))
 
     # .fardata: 24-byte KNOB_INFO
@@ -495,7 +496,16 @@ def _build_c6000_elf_payload(
             return 4
         return 6 if va >= fardata_va else 5
 
-    def add_sym(name: str, val: int, sz: int, stype: int, bind: int, vis: int) -> int:
+    def add_sym(
+        name: str,
+        val: int,
+        sz: int,
+        stype: int,
+        bind: int,
+        vis: int,
+        shndx: int | None = None,
+        map_reloc: bool = True,
+    ) -> int:
         idx = len(syms)
         syms.append({
             "name": name,
@@ -504,11 +514,13 @@ def _build_c6000_elf_payload(
             "sz": sz,
             "info": (bind << 4) | stype,
             "other": vis,
-            "shndx": shndx_of(val),
+            "shndx": shndx_of(val) if shndx is None else shndx,
         })
-        va_to_idx[val] = idx
+        if map_reloc:
+            va_to_idx[val] = idx
         return idx
 
+    add_sym(f"_Fx_FLT_{effect_name}_Coe", coe_va, 0x44, 1, 0, 2)
     add_sym("_infoEffectTypeKnob_A_2", knob_info_va, len(fardata), 1, 0, 2)
     add_sym(f"picEffectType_{effect_name}", CONST_VA, len(pic_rle), 1, 0, 2)
     add_sym("TRIM_LUT", lut_va, len(TRIM_LUT) * 4, 1, 0, 2)
@@ -520,6 +532,18 @@ def _build_c6000_elf_payload(
     add_sym(f"Fx_FLT_{effect_name}_onf", TEXT_VA + onf_off, 0, 2, 0, 2)
     add_sym("effectTypeImageInfo", info_va, 212, 1, 0, 2)
     add_sym("SonicStomp", desc_va, len(desc), 1, 0, 2)
+    for ti_name in ("__TI_STATIC_BASE", "__TI_pprof_out_hndl", "__TI_prof_data_size", "__TI_prof_data_start"):
+        is_pprof = "pprof" in ti_name or "prof_data" in ti_name
+        add_sym(
+            ti_name,
+            0xFFFFFFFF if is_pprof else 0,
+            0,
+            0,
+            0,
+            2,
+            shndx=0xFFF1 if is_pprof else 0,
+            map_reloc=False,
+        )
 
     first_global_idx = len(syms)
     dll_name = f"Dll_{effect_name}"
