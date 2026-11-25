@@ -612,7 +612,8 @@ export class WebMidiService {
       // Legacy MS-50G / MS-70CDR (MSOG) does NOT send a 0x00 SysEx ACK after 0x32 Store;
       // verify real hardware persistence via 0x29 read-back dump on Rig 01 and the final slot.
       const verifyReadback = Boolean(this.zoomIn && delayMs > 0);
-      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 400) : delayMs;
+      const writeWaitMs = delayMs > 1 ? Math.max(delayMs, 180) : delayMs;
+      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 350) : delayMs;
       try {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
@@ -636,15 +637,22 @@ export class WebMidiService {
           this.zoomOut.send([0xc0, idx]);
           await sleep(delayMs);
           this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, idx, patches48[idx]));
-          await sleep(delayMs);
+          await sleep(writeWaitMs);
           this.zoomOut.send(buildPatchStoreSysex(this.zoomModelId, idx));
           await sleep(storeWaitMs);
 
           if (verifyReadback && (idx === 0 || idx === patches48.length - 1)) {
-            // Re-enable Editor Mode (0x50) in case 0x32 Store exited it, then verify via 0x29 read-back
-            this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
-            await sleep(delayMs);
-            const dump = await this.readCurrentPatchDump(1200);
+            // Reload from flash via 0x50 + PC + 0x29 (exact sequence proven by Read from MS-50G), with retries
+            let dump: Uint8Array | null = null;
+            const maxAttempts = delayMs > 1 ? 3 : 1;
+            for (let attempt = 0; attempt < maxAttempts && !dump; attempt++) {
+              if (attempt > 0) await sleep(300);
+              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+              await sleep(delayMs);
+              this.zoomOut.send([0xc0, idx]);
+              await sleep(delayMs);
+              dump = await this.readCurrentPatchDump(1200);
+            }
             if (!dump) {
               try {
                 this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
