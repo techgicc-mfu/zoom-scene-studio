@@ -1,0 +1,29 @@
+{
+  "effect_name": "SCENE",
+  "comment": "4-Scene gapless controller + per-rig Salfini VP-1 expression router + smoothed solo dB trim",
+  "gid": 2,
+  "fxid": 405,
+  "fxid_hex": "0x0195",
+  "version": "1.00",
+  "flags_byte": 1,
+  "params": [
+    {
+      "name": "SCENE",
+      "max": 3,
+      "default": 0,
+      "comment": "CC 15: 0=Scene A, 1=Scene B, 2=Scene C, 3=Scene D"
+    },
+    {
+      "name": "EXPR",
+      "max": 100,
+      "default": 0,
+      "comment": "CC 16: Live Salfini VP-1 foot sweep routed per-rig by scene-engine"
+    },
+    {
+      "name": "TRIM",
+      "max": 24,
+      "default": 12,
+      "comment": "CC 17: -6.0 dB (0) to +6.0 dB (24) in 0.5 dB steps; 12 = 0.0 dB unity"
+    }
+  ]
+}
