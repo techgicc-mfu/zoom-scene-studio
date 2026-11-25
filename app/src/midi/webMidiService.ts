@@ -20,6 +20,8 @@ export interface MidiPortLike {
   id?: string;
   name?: string | null;
   state?: string;
+  connection?: string;
+  open?: () => Promise<unknown>;
   send: (data: number[] | Uint8Array) => void;
 }
 
@@ -27,6 +29,8 @@ export interface MidiInputLike {
   id?: string;
   name?: string | null;
   state?: string;
+  connection?: string;
+  open?: () => Promise<unknown>;
   onmidimessage: ((ev: { data: Uint8Array }) => void) | null;
 }
 
@@ -82,6 +86,8 @@ export class WebMidiService {
   private pendingZoomDumpResolve: ((data: Uint8Array) => void) | null = null;
   private pendingZoomAckResolve: (() => void) | null = null;
   private pendingZoomIdentityResolve: (() => void) | null = null;
+  private zoomRxCount: number = 0;
+  private lastZoomRxSummary: string = 'none';
 
   constructor(injected?: InjectedPorts | null) {
     this.injected = injected;
@@ -282,7 +288,21 @@ export class WebMidiService {
         if (changed) this.notifyConnectionChange();
       };
 
+      if (this.zoomIn) {
+        try {
+          await this.zoomIn.open?.();
+        } catch {
+          // ignore open error if already open
+        }
+      }
       if (this.zoomOut) {
+        try {
+          await this.zoomOut.open?.();
+        } catch {
+          // ignore open error if already open
+        }
+        this.zoomRxCount = 0;
+        this.lastZoomRxSummary = 'none';
         const idPromise = this.zoomIn
           ? new Promise<void>((resolve) => {
               const t = setTimeout(() => {
@@ -290,7 +310,7 @@ export class WebMidiService {
                   this.pendingZoomIdentityResolve = null;
                   resolve();
                 }
-              }, 250);
+              }, 350);
               this.pendingZoomIdentityResolve = () => {
                 clearTimeout(t);
                 resolve();
@@ -331,6 +351,12 @@ export class WebMidiService {
   }
 
   private handleZoomReply(data: Uint8Array): void {
+    this.zoomRxCount++;
+    const head = Array.from(data.slice(0, 10))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join(' ');
+    this.lastZoomRxSummary = `len=${data.length} [${head}]`;
+
     // Universal Identity Reply: F0 7E 00 06 02 52 <modelId> ...
     if (data.length >= 7 && data[0] === 0xf0 && data[1] === 0x7e && data[5] === 0x52) {
       if (data[6] === 0x58 || data[6] === 0x61) {
@@ -481,7 +507,11 @@ export class WebMidiService {
           const timer = setTimeout(() => {
             if (this.pendingZoomDumpResolve) {
               this.pendingZoomDumpResolve = null;
-              reject(new Error(`Timed out waiting for MS-50G reply on slot ${idx + 1}`));
+              reject(
+                new Error(
+                  `Timed out waiting for MS-50G reply on slot ${idx + 1} [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]`
+                )
+              );
             }
           }, timeoutMs);
           this.pendingZoomDumpResolve = (bytes) => {
@@ -577,7 +607,7 @@ export class WebMidiService {
       // Legacy MS-50G / MS-70CDR (MSOG) does NOT send a 0x00 SysEx ACK after 0x32 Store;
       // verify real hardware persistence via 0x29 read-back dump on Rig 01 and the final slot.
       const verifyReadback = Boolean(this.zoomIn && delayMs > 0);
-      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 160) : delayMs;
+      const storeWaitMs = delayMs > 1 ? Math.max(delayMs, 300) : delayMs;
       try {
         this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
         await sleep(delayMs);
@@ -609,7 +639,7 @@ export class WebMidiService {
               } catch {
                 // ignore exit-editor error on unresponsive pedal
               }
-              const msg = `Zoom MS-50G did not reply to read-back verification after saving ${rigDisplay}. Power-cycle USB, click Scan USB, and try Sync All again.`;
+              const msg = `Zoom MS-50G did not reply to read-back verification after saving ${rigDisplay} [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]. Power-cycle USB, click Scan USB, and try Sync All again.`;
               onProgress({
                 phase: 'error',
                 current: step,
