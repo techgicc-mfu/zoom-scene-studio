@@ -101,7 +101,7 @@ export function buildChocolateSwitchPackets(sw: number, midiChannel: number = 1)
   const longHoldCcs: Array<[number, number]> = [
     [80, 127], // Hold A: Prev Rig
     [81, 127], // Hold B: Next Rig
-    [74, 127], // Hold C: Silent Tuner ON (slot 1 toggles OFF with 0)
+    [74, 127], // Hold C: Tuner ON (CC 74 >= 64). A press sends EVERY slot of the list, so there must be no 'OFF' slot.
     [82, 127], // Hold D: Tap Tempo
   ];
   const packets: Uint8Array[] = [];
@@ -114,16 +114,16 @@ export function buildChocolateSwitchPackets(sw: number, midiChannel: number = 1)
   appendProgramCcSlot(packets, shortBase, ch0, 15, shortScenes[sw]);
   appendClearSlot(packets, midiCodeAddr(0, sw, 0, 1, 0));
 
-  // 3. Program Long Hold slot 0 (and slot 1 = CC 74=0 on Switch C so Hold C toggles Tuner ON/OFF)
+  // 3. Program Long Hold slot 0 and terminate the list by clearing slot 1 (also removes the old CC 74=0 'OFF' slot that a
+  //    previous Scene Studio version wrote on Switch C: the Chocolate Plus sends the whole list on one press, so it
+  //    opened the tuner and closed it again at once)
   const longBase = midiCodeAddr(0, sw, 1, 0, 0);
   const [holdCc, holdVal] = longHoldCcs[sw];
   appendProgramCcSlot(packets, longBase, ch0, holdCc, holdVal);
 
+  appendClearSlot(packets, midiCodeAddr(0, sw, 1, 1, 0));
   if (sw === 2) {
-    appendProgramCcSlot(packets, midiCodeAddr(0, sw, 1, 1, 0), ch0, 74, 0);
     appendClearSlot(packets, midiCodeAddr(0, sw, 1, 2, 0));
-  } else {
-    appendClearSlot(packets, midiCodeAddr(0, sw, 1, 1, 0));
   }
 
   return packets;
@@ -159,6 +159,72 @@ export function buildChocolateLiveConfigPackets(midiChannel: number = 1): Uint8A
   return packets;
 }
 
+/** Decodes the blob address out of a 21-byte `09 49` write packet. */
+export function decodeChocolateWriteAddr(pkt: Uint8Array): number {
+  return (pkt[9] & 0x7f) | ((pkt[10] & 0x7f) << 7) | ((pkt[11] & 0x7f) << 14);
+}
+
+const SWITCH_NAMES = ['A', 'B', 'C', 'D'] as const;
+
+/** Plain-English label for a Chocolate Plus config address (used in sync failure reports). */
+export function describeChocolateAddr(addr: number): string {
+  switch (addr) {
+    case 0: return 'Operating Mode';
+    case 1: return 'Expression Jack Mode';
+    case 2: return 'MIDI Channel';
+    case 3: return 'Expression Latch';
+    case 4: return 'Expression CC 16';
+    case 23639: return 'Bank Count';
+    case 23640: return 'Active Page';
+    case 23642: return 'Expression Polarity';
+    default: break;
+  }
+  const rel = addr - ADV_CUSTOM_START;
+  if (rel >= 0 && rel < ADV_CUSTOM_BLOCK * 4) {
+    const sw = Math.floor(rel / ADV_CUSTOM_BLOCK);
+    const off = rel % ADV_CUSTOM_BLOCK;
+    const name = `Switch ${SWITCH_NAMES[sw]}`;
+    if (off === 0) return `${name} Tap/Hold Mode`;
+    const listOff = off - 1;
+    const bank = listOff < 80 ? 'Short Tap' : listOff < 160 ? 'Long Hold' : 'Extra';
+    if (bank === 'Extra') return `${name} (extra field)`;
+    const slot = Math.floor((listOff % 80) / 5);
+    return `${name} ${bank}${slot > 0 ? ` #${slot + 1}` : ''}`;
+  }
+  return `address ${addr}`;
+}
+
+/**
+ * Expected MIDI that each Chocolate Plus footswitch gesture sends once Scene Studio's config is applied.
+ * Used by the Footswitch Tester to decode what the controller actually sends.
+ */
+export function describeFootswitchMessage(status: number, data1: number, data2: number): {
+  label: string;
+  expected: boolean;
+  switchIndex: number | null;
+} {
+  const type = status & 0xf0;
+  const ch = (status & 0x0f) + 1;
+  if (type === 0xb0) {
+    if (data1 === 15) {
+      const idx = ([0, 42, 84, 127] as number[]).indexOf(data2);
+      if (idx >= 0) {
+        return { label: `Tap ${SWITCH_NAMES[idx]} → Scene ${SWITCH_NAMES[idx]} (CC 15 = ${data2})`, expected: true, switchIndex: idx };
+      }
+      return { label: `CC 15 = ${data2} (not a Scene value — expected 0/42/84/127)`, expected: false, switchIndex: null };
+    }
+    if (data1 === 80 && data2 >= 64) return { label: 'Hold A → Previous Rig (CC 80)', expected: true, switchIndex: 0 };
+    if (data1 === 81 && data2 >= 64) return { label: 'Hold B → Next Rig (CC 81)', expected: true, switchIndex: 1 };
+    if (data1 === 74) return { label: `Hold C → Tuner ${data2 >= 64 ? 'ON' : 'OFF'} (CC 74)${data2 < 64 ? ' — unexpected: this closes the tuner again' : ''}`, expected: true, switchIndex: 2 };
+    if (data1 === 82 && data2 >= 64) return { label: 'Hold D → Tap Tempo (CC 82)', expected: true, switchIndex: 3 };
+    if (data1 === 16 || data1 === 11) return { label: `Expression pedal CC ${data1} = ${data2}`, expected: data1 === 16, switchIndex: null };
+    return { label: `Unexpected CC ${data1} = ${data2} on Ch ${ch} (factory/stale setting)`, expected: false, switchIndex: null };
+  }
+  if (type === 0xc0) return { label: `Unexpected Program Change ${data1} on Ch ${ch} (factory/stale setting)`, expected: false, switchIndex: null };
+  if (type === 0x90 || type === 0x80) return { label: `Unexpected Note ${data1} on Ch ${ch} (factory/stale setting)`, expected: false, switchIndex: null };
+  return { label: `Unexpected MIDI ${status.toString(16)} ${data1} ${data2}`, expected: false, switchIndex: null };
+}
+
 function writeCcEntry(buf: Uint8Array, offset: number, channel0: number, cc: number, val: number): void {
   buf[offset + 0] = 0x01; // enabled
   buf[offset + 1] = channel0 & 0x0f;
@@ -189,7 +255,7 @@ export function generateChocolateFcpBlob(midiChannel: number = 1): Uint8Array {
   const longHoldCcs: Array<[number, number]> = [
     [80, 127], // Hold A: Previous Gig Rig (01..12)
     [81, 127], // Hold B: Next Gig Rig (01..12)
-    [74, 127], // Hold C: Tuner On/Off
+    [74, 127], // Hold C: Tuner ON (exit with knob 2 EXIT)
     [82, 127], // Hold D: Tap Tempo
   ];
 
@@ -202,9 +268,6 @@ export function generateChocolateFcpBlob(midiChannel: number = 1): Uint8Array {
       writeCcEntry(buf, base + BANK_A_LIST_OFF, ch0, 15, shortScenes[sw]);
       const [holdCc, holdVal] = longHoldCcs[sw];
       writeCcEntry(buf, base + BANK_B_LIST_OFF, ch0, holdCc, holdVal);
-      if (sw === 2) {
-        writeCcEntry(buf, base + BANK_B_LIST_OFF + 5, ch0, 74, 0); // Hold C toggle OFF
-      }
     }
   }
 
@@ -218,32 +281,32 @@ export function generateChocolateFcpBlob(midiChannel: number = 1): Uint8Array {
 }
 
 /**
- * Mirrors firmware `vp1_curve_map` for UI preview & live calibration meter.
+ * Mirrors the firmware engine's integer expression math (firmware/midistomp_patch/scene_engine_asm.py: curve_value / expr_value).
+ * `rawCc` is the pedal's 0..127 CC; SCENE.ZDL stores it as EXPR 0..100 (round(cc * 100 / 127)), which is what the curves act on.
+ * Returns the 0..100 percentage written to the target parameter's range.
  */
+export function expressionFromCc(rawCc: number): number {
+  const cc = Math.max(0, Math.min(127, Math.round(rawCc)));
+  return Math.round((cc * 100) / 127);
+}
+
+export function curveValue(curve: Vp1CurveType, expr: number): number {
+  const e = Math.max(0, Math.min(100, Math.trunc(expr)));
+  if (curve === 'linear') return e;
+  const lin = e <= 2 ? 0 : e >= 79 ? 100 : Math.floor(((e - 2) * 100 + 38) / 77);
+  if (curve === 'vp1') return lin;
+  return Math.floor((lin * lin + 50) / 100);
+}
+
 export function applyVp1Curve(
   rawCc: number,
   curve: Vp1CurveType,
   minPct: number,
   maxPct: number
 ): number {
-  const raw = Math.max(0, Math.min(127, Math.round(rawCc)));
-  const lo = Math.max(0, Math.min(100, minPct));
-  const hi = Math.max(0, Math.min(100, maxPct));
-
-  let norm: number;
-  if (curve === 'vp1') {
-    if (raw <= 3) norm = 0;
-    else if (raw >= 100) norm = 1;
-    else norm = (raw - 3) / 97;
-  } else if (curve === 'swell') {
-    if (raw <= 3) norm = 0;
-    else {
-      const lin = Math.min(1, (raw - 3) / 97);
-      norm = lin * lin;
-    }
-  } else {
-    norm = raw / 127;
-  }
-
-  return Math.round(lo + norm * (hi - lo));
+  const lo = Math.max(0, Math.min(100, Math.round(minPct)));
+  const hi = Math.max(0, Math.min(100, Math.round(maxPct)));
+  const n = curveValue(curve, expressionFromCc(rawCc));
+  const t = Math.floor((Math.abs(hi - lo) * n + 50) / 100);
+  return hi >= lo ? lo + t : lo - t;
 }

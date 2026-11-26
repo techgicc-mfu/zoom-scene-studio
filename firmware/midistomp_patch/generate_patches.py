@@ -7,6 +7,7 @@ import struct
 
 import yaml
 
+from firmware.midistomp_patch.scene_engine_asm import assemble_scene_engine
 from firmware.midistomp_patch.c674x_asm import (
     CREG_A0,
     CREG_A1,
@@ -183,230 +184,8 @@ def _assemble_pc_guard() -> bytes:
 
 
 def _assemble_scene_engine() -> bytes:
-    """DDR resident RTOS scene-engine @ 0xC0110200 chained after diag/midi-clock @ 0xC00C6998.
-
-    Maintains `Clock_getTicks()` contract (calls `diag_poll` 0xC00F3108 which runs midi-clock +
-    tempo-lock + SYSTEM dashboard and returns ticks in `A4`, preserves B3/callees) and:
-      1. Calls `DIAG_POLL` (0xC00F3108) and saves ticks on stack frame.
-      2. Checks `Slot0.fxid == 0x0195` (`SCENE.ZDL`) and `0 <= CUR_PATCH < 12`.
-      3. On rig change (`CUR_PATCH != last_rig`): calls `REC_LOAD` (0xC00B4AAC) for the 3
-         Shadow Records `12 + r*3 + {0,1,2}` into `ADDR_SHADOW_CACHE` (0xC0120100) in DDR.
-      4. On scene change (`Slot0.SCENE != last_scene`): reads cached DDR snapshot without flash I/O
-         and calls `SEM_PEND` (0xC00C7EE0) / `FX_SET_PARAM` (0xC00BB600) / `SEM_POST` (0xC00D6B00)
-         / `UI_REFRESH` (0xC00ACD84) / `EVENT_POST` (0xC00CBF40) for Slots 1..5.
-      5. On expression sweep (`Slot0.EXPR != last_expr`): queries `FX_PARAM_DESC` (0xC00B056C),
-         applies VP-1 scaling + `SEM_PEND` / `FX_SET_PARAM` / `SEM_POST` / `EVENT_POST`.
-    """
-    base = ADDR_SCENE_ENGINE
-    w: list[int] = []
-
-    def cur_va() -> int:
-        return base + len(w) * 4
-
-    def pad_to_pkt() -> None:
-        _pad_words_to_pkt(w)
-
-    # --- Prologue (32 bytes frame, save B3, A10..A13) ---
-    w.extend([
-        addk_s(1, -32, 15),           # addk .S2 -32, b15
-        stw_off(1, 1, 3, 15, 2),      # b3  @ +8
-        stw_off(1, 0, 10, 15, 3),     # a10 @ +12
-        stw_off(1, 0, 11, 15, 4),     # a11 @ +16
-        stw_off(1, 0, 12, 15, 5),     # a12 @ +20
-        stw_off(1, 0, 13, 15, 6),     # a13 @ +24
-    ])
-    # 1. Chain to MIDISTOMP diag_poll (0xC00F3108 -> midi-clock -> Clock_getTicks) and save A4 at +28
-    farcall(OS_DIAG_POLL, cur_va() + 24, w)
-    w.append(stw_off(1, 0, 4, 15, 7))  # save ticks in frame[7]
-
-    # 2. Verify Slot0.fxid == 0x0195 and 0 <= CUR_PATCH < 12 (never run REC_LOAD on shadow/unmanaged slots!)
-    w.extend([
-        mvkl_s(1, OS_ACTIVE_SLOTS, 5),
-        mvkh_s(1, OS_ACTIVE_SLOTS, 5),
-        ldw_off(1, 0, 5, 1, 10),     # a10 = Slot0.fxid
-        ldw_b14(B14_CUR_PATCH_W, 11),# a11 = CUR_PATCH
-        mvkl_s(0, SCENE_FXID, 0),
-        mvkh_s(0, SCENE_FXID, 0),
-        mvk_s(0, 11, 2),             # a2 = 11 (max playable Gig Rig index)
-        nop(2),
-        sub_l(0, 10, 0, 1),          # a1 = fxid - 0x0195
-        cmpgtu_l(0, 2, 11, 2),       # a2 = (CUR_PATCH > 11 unsigned)
-    ])
-    pad_to_pkt()
-    # Branch to epilogue if not SCENE.ZDL ([a1]) or not Rig 01..12 ([a2])
-    pkt_guard_va = cur_va()
-    skip_branch_idx = len(w)
-    w.append(nop(1))                 # placeholder: [a1] b epilogue_va
-    skip_rig_bounds_idx = len(w)
-    w.extend([nop(1), nop(5)])       # placeholder: [a2] b epilogue_va
-
-    # 3. Pre-cache Shadow Records 12 + r*3 + {0,1,2} into DDR ADDR_SHADOW_CACHE when CUR_PATCH != last_rig
-    w.extend([
-        mvkl_s(0, ADDR_SCENE_STATE, 12),
-        mvkh_s(0, ADDR_SCENE_STATE, 12),
-        ldw_off(0, 0, 12, 0, 0),     # a0 = state[0] (last_rig)
-        nop(4),
-        sub_l(0, 0, 11, 1),          # a1 = last_rig - cur_patch
-    ])
-    pad_to_pkt()
-    skip_rec_load_idx = len(w)
-    w.extend([nop(1), nop(5)])       # placeholder: [!a1] skip to scene check
-
-    # Rig changed -> store new last_rig, reset last_scene=0 and last_expr=0, pre-load Scene A + 3 Shadow Records via REC_LOAD
-    w.extend([
-        stw_off(0, 0, 11, 12, 0),    # state[0] = CUR_PATCH
-        mvk_s(0, 0, 13),
-        stw_off(0, 0, 13, 12, 1),    # state[1] = 0 (last_scene = Scene A)
-        stw_off(0, 0, 13, 12, 2),    # state[2] = 0 (last_expr = 0)
-        # Cache Scene A (CUR_PATCH = a11) into ADDR_SHADOW_CACHE + 0*256
-        mv_l(0, 11, 4),              # a4 = CUR_PATCH (Scene A)
-        mvkl_s(1, ADDR_SHADOW_CACHE, 4),
-        mvkh_s(1, ADDR_SHADOW_CACHE, 4),
-    ])
-    farcall(OS_REC_LOAD, cur_va() + 24, w)
-    w.extend([
-        add_l(0, 11, 11, 10),        # a10 = 2 * r
-        add_l(0, 10, 11, 10),        # a10 = 3 * r
-        add_lcst(0, 10, 12, 10),     # a10 = 3 * r + 12 (Shadow B record index; src2=a10, scst5=12)
-    ])
-    for s_idx in range(3):
-        w.extend([
-            add_lcst(0, 10, s_idx, 4),                            # a4 = record index (12 + 3*r + s_idx)
-            mvkl_s(1, ADDR_SHADOW_CACHE + (s_idx + 1) * 256, 4),  # b4 = DDR cache[1..3] (Scene B, C, D)
-            mvkh_s(1, ADDR_SHADOW_CACHE + (s_idx + 1) * 256, 4),
-        ])
-        farcall(OS_REC_LOAD, cur_va() + 24, w)
-
-    # 4. Scene Change Dispatcher (Slot0.P1 = SCENE 0..3): apply cached Scene A/B/C/D enabled bits for Slots 1..5
-    pad_to_pkt()
-    scene_check_va = cur_va()
-    w.extend([
-        mvkl_s(1, OS_ACTIVE_SLOTS, 5),
-        mvkh_s(1, OS_ACTIVE_SLOTS, 5),
-        ldw_off(1, 0, 5, 2, 10),     # a10 = Slot0.SCENE (P1 @ +8, 0=A, 1=B, 2=C, 3=D)
-        ldw_off(0, 0, 12, 1, 0),     # a0 = last_scene
-        nop(4),
-        sub_l(0, 10, 0, 1),          # a1 = scene - last_scene
-    ])
-    pad_to_pkt()
-    skip_scene_apply_idx = len(w)
-    w.extend([nop(1), nop(5)])       # [!a1] -> skip to expression check
-
-    w.append(stw_off(0, 0, 10, 12, 1))  # state[1] = active scene
-    # Clamp scene (a10) to 0..3, then compute a13 = ADDR_SHADOW_CACHE + (scene << 8)
-    w.extend([
-        mvk_s(0, 3, 2),
-        cmpgtu_l(0, 2, 10, 0),       # a0 = (scene > 3 unsigned)
-        mvk_s(0, 0, 10, cond=CREG_A0),
-        add_l(0, 10, 10, 13),        # a13 = scene * 2
-        add_l(0, 13, 13, 13),        # *4
-        add_l(0, 13, 13, 13),        # *8
-        add_l(0, 13, 13, 13),        # *16
-        add_l(0, 13, 13, 13),        # *32
-        add_l(0, 13, 13, 13),        # *64
-        add_l(0, 13, 13, 13),        # *128
-        add_l(0, 13, 13, 13),        # *256 (scene << 8)
-        mvkl_s(0, ADDR_SHADOW_CACHE, 1),
-        mvkh_s(0, ADDR_SHADOW_CACHE, 1),
-        add_l(0, 1, 13, 13),         # a13 = cached 122B record pointer for Scene A/B/C/D (callee-saved!)
-    ])
-    w.extend([ldw_b14(B14_SEM_HANDLE_W, 4), mvk_l(1, -1, 4)])
-    farcall(OS_SEM_PEND, cur_va() + 24, w)
-    # Apply On/Off (param 0) for Slots 1..5 from cached 122B record: slot s enabled bit is raw[s*18] bit 0
-    for slot_idx in range(1, 6):
-        byte_off = slot_idx * 18
-        word_off = byte_off // 4
-        bit_shift = (byte_off % 4) * 8
-        w.extend([
-            ldw_off(0, 0, 13, word_off, 6),  # a6 = word containing raw[slot_idx * 18]
-            mvk_s(0, slot_idx, 4),           # a4 = slot_idx (1..5)
-            mvk_s(1, 0, 4),                  # b4 = param 0 (On/Off)
-            mvk_l(1, 0, 6),                  # b6 = 0
-            mvk_l(0, 1, 8),                  # a8 = 1
-            mvk_s(0, 1, 2),                  # a2 = 1 mask (5 cycles after ldw -> a6 ready)
-        ])
-        if bit_shift > 0:
-            w.append(shru_s(0, 6, bit_shift, 6))
-        w.append(and_l(0, 6, 2, 6))          # a6 = enabled (0 or 1)
-        farcall(OS_FX_SET_PARAM, cur_va() + 24, w)
-    w.append(ldw_b14(B14_SEM_HANDLE_W, 4))
-    farcall(OS_SEM_POST, cur_va() + 24, w)
-    w.extend([ldw_b14(B14_UI_EVENT_W, 4), mvk_s(1, 0x40, 4)])
-    farcall(OS_EVENT_POST, cur_va() + 24, w)
-
-    # 5. Live VP-1 Expression Dispatcher (Slot0.P2 = EXPR 0..100): query FX_PARAM_DESC + scale + apply
-    pad_to_pkt()
-    expr_check_va = cur_va()
-    w.extend([
-        mvkl_s(1, OS_ACTIVE_SLOTS, 5),
-        mvkh_s(1, OS_ACTIVE_SLOTS, 5),
-        ldw_off(1, 0, 5, 3, 10),     # a10 = Slot0.EXPR (P2 @ +12)
-        ldw_off(0, 0, 12, 2, 0),     # a0 = last_expr
-        nop(4),
-        sub_l(0, 10, 0, 1),          # a1 = expr - last_expr
-    ])
-    pad_to_pkt()
-    skip_expr_apply_idx = len(w)
-    w.extend([nop(1), nop(5)])       # [!a1] -> epilogue
-
-    w.append(stw_off(0, 0, 10, 12, 2))
-    w.extend([
-        mvk_s(0, 1, 4),              # target slot (1..5 from DDR cache)
-        mvk_s(1, 1, 4),              # target param (1..9)
-    ])
-    farcall(OS_FX_PARAM_DESC, cur_va() + 24, w)
-    w.extend([
-        mv_l(0, 4, 1),               # guard descriptor != NULL
-        nop(1),
-    ])
-    pad_to_pkt()
-    skip_expr_desc_idx = len(w)
-    w.extend([nop(1), nop(5)])
-
-    w.extend([
-        ldw_off(0, 0, 4, 3, 0),      # a0 = param_desc->max (+12)
-        ldw_b14(B14_SEM_HANDLE_W, 4),
-        mvk_l(1, -1, 4),
-    ])
-    farcall(OS_SEM_PEND, cur_va() + 24, w)
-    w.extend([
-        mvk_s(0, 1, 4),
-        mvk_s(1, 1, 4),
-        mv_l(0, 10, 6),              # scaled expr value
-        mvk_l(1, 0, 6),
-        mvk_l(0, 1, 8),
-    ])
-    farcall(OS_FX_SET_PARAM, cur_va() + 24, w)
-    w.append(ldw_b14(B14_SEM_HANDLE_W, 4))
-    farcall(OS_SEM_POST, cur_va() + 24, w)
-    w.extend([ldw_b14(B14_UI_EVENT_W, 4), mvk_s(1, 0x40, 4)])
-    farcall(OS_EVENT_POST, cur_va() + 24, w)
-
-    # --- Epilogue: restore ticks -> A4, restore callees, B B3; NOP 5 ---
-    pad_to_pkt()
-    epilogue_va = cur_va()
-    w.extend([
-        ldw_off(1, 0, 15, 7, 4),     # a4 = saved Clock_getTicks()
-        ldw_off(1, 1, 15, 2, 3),     # restore b3
-        ldw_off(1, 0, 15, 3, 10),
-        ldw_off(1, 0, 15, 4, 11),
-        ldw_off(1, 0, 15, 5, 12),
-        ldw_off(1, 0, 15, 6, 13),
-        nop(4),
-        addk_s(1, 32, 15),
-        b_reg_s2(3),
-        nop(5),
-    ])
-
-    # Patch forward conditional branch targets now that all packet VAs are known
-    w[skip_branch_idx] = b_disp(epilogue_va, pkt_guard_va, cond=CREG_A1)
-    w[skip_rig_bounds_idx] = b_disp(epilogue_va, pkt_guard_va, cond=CREG_A2)
-    w[skip_rec_load_idx] = b_disp(scene_check_va, base + skip_rec_load_idx * 4, cond=CREG_NOT_A1)
-    w[skip_scene_apply_idx] = b_disp(expr_check_va, base + skip_scene_apply_idx * 4, cond=CREG_NOT_A1)
-    w[skip_expr_apply_idx] = b_disp(epilogue_va, base + skip_expr_apply_idx * 4, cond=CREG_NOT_A1)
-    w[skip_expr_desc_idx] = b_disp(epilogue_va, base + skip_expr_desc_idx * 4, cond=CREG_NOT_A1)
-
-    return pack_words_padded32(w)
+    """Scene engine v2 (trim + on/off + all 45 knobs per scene, per-rig expression routing); see scene_engine_asm.py."""
+    return assemble_scene_engine()
 
 
 def generate_all_patches(out_dir: Path) -> list[Path]:
@@ -469,7 +248,7 @@ def generate_all_patches(out_dir: Path) -> list[Path]:
     poll_hook_word = struct.pack("<I", callp(ADDR_SCENE_ENGINE, OS_POLL_CALL_SITE)).hex()
     scene_engine = {
         "name": "scene-engine",
-        "description": "Chained after MIDISTOMP diag_poll: pre-caches Shadow Records 12..47 into DDR via REC_LOAD, and applies diffed FX_SET_PARAM + VP-1 curve",
+        "description": "Chained after MIDISTOMP diag_poll: caches each rig's 4 scene records in DDR; a scene change applies trim, on/off and all knobs; expression is routed per rig",
         "builds": ["ms70cdr-2.10"],
         "write": [
             {

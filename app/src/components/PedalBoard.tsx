@@ -2,7 +2,10 @@ import React from 'react';
 import {
   CATEGORY_META,
   EFFECT_CATALOG,
+  getAvailableCabs,
   getEffectDefinition,
+  isGuitarAmpFxid,
+  normalizeCabValue,
 } from '../data/effectCatalog';
 import { useRigStore } from '../store/rigStore';
 import { EffectCategory } from '../types/rig';
@@ -23,6 +26,8 @@ export const PedalBoard: React.FC = () => {
   const togglePedal = useRigStore((s) => s.togglePedal);
   const setPedalParam = useRigStore((s) => s.setPedalParam);
   const setPedalModel = useRigStore((s) => s.setPedalModel);
+  const setPedalCab = useRigStore((s) => s.setPedalCab);
+  const cabs = getAvailableCabs();
 
   const currentChain = rig.scenes[activeScene];
   const baselineChainA = rig.scenes.A;
@@ -106,6 +111,35 @@ export const PedalBoard: React.FC = () => {
             <div className="stompbox-knobs">
               {def
                 ? def.params.map((pSpec, pIdx) => {
+                    if (isGuitarAmpFxid(slot.fxid) && pIdx === 7) {
+                      const cabVal = normalizeCabValue(slot.fxid, slot.params[7] ?? pSpec.defaultValue);
+                      const known = cabVal === 0 || cabs.some((c) => c.id === cabVal);
+                      const ownCab = slot.fxid & 0x1ff;
+                      return (
+                        <div key="cab" className="knob-row cab-row">
+                          <div className="knob-label-line">
+                            <span className="knob-name">CAB</span>
+                            <span className="knob-val">{cabVal === 0 ? 'Off' : ''}</span>
+                          </div>
+                          <select
+                            className="stompbox-model-select cab-select"
+                            aria-label={`Cabinet for Pedal ${pedalIdx + 1} (${def.shortName})`}
+                            value={cabVal}
+                            onChange={(e) => setPedalCab(pedalIdx, Number(e.target.value))}
+                          >
+                            <option value={0}>Cab Off (amp only)</option>
+                            {cabs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                                {c.id === ownCab ? ' (matching this amp)' : ''}
+                              </option>
+                            ))}
+                            {!known && <option value={cabVal}>Custom cab #{cabVal} (kept as read)</option>}
+                          </select>
+                          <div className="cab-note">Same cab in all four scenes.</div>
+                        </div>
+                      );
+                    }
                     const val = slot.params[pIdx] ?? pSpec.defaultValue;
                     const valA = baseSlotA.params[pIdx] ?? pSpec.defaultValue;
                     const paramDiffers = activeScene !== 'A' && val !== valA;

@@ -123,11 +123,92 @@ def cmpgtu_l(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = 
 
 
 def mpy32_m(side: int, src2: int, src1: int, dst: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
-    """MPY32 .M1/.M2 src1, src2, dst (signed 32x32->32)."""
-    # handler.S +0xb8? Wait +0xc0 / +0xd0: mpy32 is op 0x00000230?
-    # Let's check handler.S +0x64..+0xc8: mpy32 .M1 a13, a0, a1 at line 99 is right after `ldw *+a4(12)` (+0xb8) + `nop 4` (+0xbc) -> `+0xc0`: `0x0081a800`!
-    op = 0x00000230 | ((x & 1) << 12) | ((side & 1) << 1)
+    """MPY32 .M1/.M2 src1, src2, dst (signed 32x32 -> low 32 bits). Opcode 0x800 verified: handler.S `mpy32 .M1 a13,a0,a1` = 0x0081A800."""
+    op = 0x800 | ((x & 1) << 12) | ((side & 1) << 1)
     return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op
+
+
+def mpy32u_m(side: int, src2: int, src1: int, dst_even: int, x: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """MPYU32 .M1/.M2 src1, src2, dst_o:dst_e (unsigned 32x32 -> 64 bit; low word in the EVEN register, high in dst_e+1).
+
+    Opcode 0x630 verified: `mpy32u .M1 a1,a0,a3:a2` = 0x01002630 (dst field = 2)."""
+    if dst_even & 1:
+        raise ValueError("mpy32u destination must be the even register of the pair")
+    op = 0x630 | ((x & 1) << 12) | ((side & 1) << 1)
+    return _cond(cond) | ((dst_even & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op
+
+
+# ---- TI-syntax-order helpers: op(src1, src2, dst) == `OP .L1 src1, src2, dst` (src1 = bits 17:13, src2 = bits 22:18) ----
+# All verified against Capstone's C64x decoder (see firmware/tests/test_scene_engine_asm.py).
+
+def _l3(op: int, side: int, src1: int, src2: int, dst: int, x: int, cond: int) -> int:
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((src1 & 0x1F) << 13) | op | ((x & 1) << 12) | ((side & 1) << 1)
+
+
+def ti_sub(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """SUB .L1 src1, src2, dst  ->  dst = src1 - src2."""
+    return _l3(0x0F8, side, src1, src2, dst, 0, cond)
+
+
+def ti_add(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return _l3(0x078, side, src1, src2, dst, 0, cond)
+
+
+def ti_or(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return _l3(0xFF8, side, src1, src2, dst, 0, cond)
+
+
+def ti_and(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return _l3(0xF78, side, src1, src2, dst, 0, cond)
+
+
+def ti_cmpgt(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """CMPGT .L1 src1, src2, dst -> dst = (signed src1 > src2)."""
+    return _l3(0x8F8, side, src1, src2, dst, 0, cond)
+
+
+def ti_cmpgtu(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return _l3(0x9F8, side, src1, src2, dst, 0, cond)
+
+
+def ti_cmpeq(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return _l3(0xA78, side, src1, src2, dst, 0, cond)
+
+
+def ti_cmpeq_k(scst5: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """CMPEQ .L1 scst5, src2, dst."""
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((scst5 & 0x1F) << 13) | 0xA58 | ((side & 1) << 1)
+
+
+def ti_and_k(scst5: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """AND .L1 scst5, src2, dst (scst5 sign-extended: only 0..15 or -16..-1 usable)."""
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((scst5 & 0x1F) << 13) | 0xF58 | ((side & 1) << 1)
+
+
+def ti_shl(src2: int, ucst5: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """SHL .S1 src2, ucst5, dst."""
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((ucst5 & 0x1F) << 13) | 0xCA0 | ((side & 1) << 1)
+
+
+def ti_shru(src2: int, ucst5: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    """SHRU .S1 src2, ucst5, dst."""
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((src2 & 0x1F) << 18) | ((ucst5 & 0x1F) << 13) | 0x9A0 | ((side & 1) << 1)
+
+
+def ti_mpy32(src1: int, src2: int, dst: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return mpy32_m(side, src2, src1, dst, 0, cond)
+
+
+def ti_mpy32u(src1: int, src2: int, dst_even: int, side: int = 0, cond: int = CREG_ALWAYS) -> int:
+    return mpy32u_m(side, src2, src1, dst_even, 0, cond)
+
+
+def ldbu_off(d_side: int, t_side: int, base: int, byte_off: int, dst: int, cond: int = CREG_ALWAYS) -> int:
+    """LDBU .D{d}T{t} *+base[ucst5], dst (byte offset 0..31). Base file = D unit side (A for .D1, B for .D2)."""
+    if not 0 <= byte_off <= 31:
+        raise ValueError("ldbu offset must be 0..31")
+    op = 0x214 | ((d_side & 1) << 7) | ((t_side & 1) << 1)
+    return _cond(cond) | ((dst & 0x1F) << 23) | ((base & 0x1F) << 18) | ((byte_off & 0x1F) << 13) | op
 
 
 def shru_s(side: int, src2: int, ucst5: int, dst: int, cond: int = CREG_ALWAYS) -> int:

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ExpressionBar } from './components/ExpressionBar';
+import { FootswitchTester } from './components/FootswitchTester';
 import { PedalBoard } from './components/PedalBoard';
 import { RigSidebar } from './components/RigSidebar';
 import { SceneStrip } from './components/SceneStrip';
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
   );
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [footTestOpen, setFootTestOpen] = useState(false);
 
   useEffect(() => {
     const unsubExp = webMidiService.onExpressionSweep((ccVal) => {
@@ -62,6 +64,13 @@ export const App: React.FC = () => {
     setStatusMessage(res.userMessage);
   };
 
+  const handleProgramChocolate = async () => {
+    const res = await webMidiService.configureChocolateOnly((prog) => {
+      setSyncProgress(prog);
+    });
+    setStatusMessage(res.userMessage);
+  };
+
   return (
     <div className="studio-shell">
       <TopSyncBar
@@ -73,6 +82,8 @@ export const App: React.FC = () => {
         onReadFromPedal={handleReadFromPedal}
         onOpenSetupGuide={() => setGuideOpen(true)}
         onSyncAll={handleSyncAll}
+        onProgramChocolate={handleProgramChocolate}
+        onOpenFootswitchTest={() => setFootTestOpen(true)}
         onStatusToast={(msg) => {
           setSyncProgress(null);
           setStatusMessage(msg);
@@ -90,6 +101,11 @@ export const App: React.FC = () => {
       </div>
 
       <SetupGuideModal isOpen={guideOpen} onClose={() => setGuideOpen(false)} />
+      <FootswitchTester
+        isOpen={footTestOpen}
+        chocolateConnected={chocolateConnected}
+        onClose={() => setFootTestOpen(false)}
+      />
     </div>
   );
 };

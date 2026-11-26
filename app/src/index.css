@@ -699,3 +699,6 @@ input {
   background: rgba(127, 29, 29, 0.45);
   color: #fecaca;
 }
+
+.cab-select { margin-top: 2px; }
+.cab-note { font-size: 0.7rem; color: #8b93a7; margin-top: 3px; }

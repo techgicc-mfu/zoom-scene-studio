@@ -728,3 +728,33 @@ export const EFFECT_BY_ID: Map<number, EffectDefinition> = new Map(
 export function getEffectDefinition(fxid: number): EffectDefinition | undefined {
   return EFFECT_BY_ID.get(fxid);
 }
+
+// ---- Guitar-amp cabinets ---------------------------------------------------------------------------------------------
+// On the MS-50G a guitar amp's CAB parameter holds the *cabinet model id*: 0 = cab off, otherwise the 9-bit model id.
+// Every amp model has its own matching cab whose id is the low 9 bits of the amp's effect id, so the cabs available to pair
+// with an amp are the cabs of the amp models in this catalog.
+export interface CabOption {
+  /** Value stored in the amp's CAB parameter (P7). */
+  id: number;
+  name: string;
+}
+
+export function isGuitarAmpFxid(fxid: number): boolean {
+  return ((fxid >>> 24) & 0x0f) === 0x04;
+}
+
+export function cabIdForAmp(ampFxid: number): number {
+  return ampFxid & 0x1ff;
+}
+
+export function getAvailableCabs(): CabOption[] {
+  return EFFECT_CATALOG.filter((fx) => fx.category === 'amp').map((fx) => ({
+    id: cabIdForAmp(fx.fxid),
+    name: `${fx.shortName} cab`,
+  }));
+}
+
+/** CAB value 1 historically means "the amp's own cab"; the MS-50G reports it back as that explicit id. */
+export function normalizeCabValue(ampFxid: number, value: number): number {
+  return value === 1 ? cabIdForAmp(ampFxid) : value;
+}

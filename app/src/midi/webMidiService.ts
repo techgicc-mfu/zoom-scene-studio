@@ -3,6 +3,8 @@ import { GigRig, SceneId, SyncProgress } from '../types/rig';
 import {
   buildChocolateDiscoverySysex,
   buildChocolateLiveConfigPackets,
+  decodeChocolateWriteAddr,
+  describeChocolateAddr,
   SCENE_CC_VALUES,
 } from './chocolateProtocol';
 import {
@@ -13,6 +15,7 @@ import {
   decompile48PatchesToRigs,
   decodePatchReadSysex,
   MIDI_PATCH_BYTES,
+  unpackRawPatch128,
 } from './zoomProtocol';
 
 export interface MidiPortLike {
@@ -85,7 +88,10 @@ export class WebMidiService {
   private pendingZoomDumpResolve: ((data: Uint8Array) => void) | null = null;
   private pendingZoomAckResolve: (() => void) | null = null;
   private pendingZoomIdentityResolve: (() => void) | null = null;
-  private pendingChocoAckResolve: (() => void) | null = null;
+  /** Incremented on every Chocolate Plus `F0 00 32 01` config ACK. */
+  private chocoAckCount: number = 0;
+  private chocoAckWaiters: Set<() => void> = new Set();
+  private chocolateMidiListeners: Set<(data: Uint8Array) => void> = new Set();
   private zoomRxCount: number = 0;
   private lastZoomRxSummary: string = 'none';
 
@@ -119,6 +125,14 @@ export class WebMidiService {
     this.expressionListeners.add(cb);
     return () => {
       this.expressionListeners.delete(cb);
+    };
+  }
+
+  /** Raw channel messages (CC / PC / Note) from the Chocolate Plus USB port, for the Footswitch Tester. */
+  public onChocolateMidi(cb: (data: Uint8Array) => void): () => void {
+    this.chocolateMidiListeners.add(cb);
+    return () => {
+      this.chocolateMidiListeners.delete(cb);
     };
   }
 
@@ -416,13 +430,14 @@ export class WebMidiService {
       data[0] === 0xf0 &&
       data[1] === 0x00 &&
       data[2] === 0x32 &&
-      data[3] === 0x01 &&
-      this.pendingChocoAckResolve
+      data[3] === 0x01
     ) {
-      const resolve = this.pendingChocoAckResolve;
-      this.pendingChocoAckResolve = null;
-      resolve();
+      this.chocoAckCount++;
+      for (const wake of Array.from(this.chocoAckWaiters)) wake();
       return;
+    }
+    if (data.length >= 2 && data[0] >= 0x80 && data[0] < 0xf0) {
+      for (const listener of this.chocolateMidiListeners) listener(new Uint8Array(data));
     }
     // Control Change message 0xB0..0xBF: filter strictly to Expression CCs (CC 16 configured, CC 11 factory)
     if (data.length >= 3 && (data[0] & 0xf0) === 0xb0) {
@@ -498,37 +513,36 @@ export class WebMidiService {
     }
   }
 
-  /**
-   * Reads all 48 managed patches (Rigs 01..12 + Shadow B/C/D) from a connected Zoom MS-50G
-   * using Program Change + `0x29` patch dump requests, preserving custom `.ZDL` fxids.
-   */
-  public async readAllFromHardware(
-    onProgress: (p: SyncProgress) => void,
-    delayMs: number = 25,
-    timeoutMs: number = 600
-  ): Promise<{ ok: boolean; rigs?: GigRig[]; userMessage: string }> {
-    if (!this.zoomOut || !this.zoomIn) {
-      return {
-        ok: false,
-        userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB before reading rigs.',
-      };
-    }
+  private patchLabel(idx: number): string {
+    return idx < 12
+      ? `Gig Rig ${String(idx + 1).padStart(2, '0')}`
+      : `Rig ${String(Math.floor((idx - 12) / 3) + 1).padStart(2, '0')} Scene ${['B', 'C', 'D'][(idx - 12) % 3]}`;
+  }
 
+  /** Reads the 48 managed raw patches (PC + `0x29` dump). Leaves editor mode and returns to Rig 01. */
+  private async readRaw48(
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number,
+    timeoutMs: number,
+    verb: string,
+    opts: { settleMs?: number; indices?: number[]; leaveEditorForPc?: boolean } = {}
+  ): Promise<{ ok: true; raw48: Uint8Array[] } | { ok: false; label: string; error: string }> {
+    const zoomOut = this.zoomOut!;
     const raw48: Uint8Array[] = [];
-    this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+    // Time the MS-50G is given to finish loading a patch after a Program Change before we ask for its dump;
+    // asking too early returns the previously loaded patch.
+    const settleMs = opts.settleMs ?? delayMs;
+    const indices = opts.indices ?? Array.from({ length: 48 }, (_, i) => i);
+    zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
     await sleep(delayMs > 0 ? Math.max(delayMs, 80) : 0);
 
-    for (let idx = 0; idx < 48; idx++) {
-      const rigLabel =
-        idx < 12
-          ? `Gig Rig ${String(idx + 1).padStart(2, '0')}`
-          : `Rig ${String(Math.floor((idx - 12) / 3) + 1).padStart(2, '0')} Scene ${['B', 'C', 'D'][(idx - 12) % 3]}`;
-
+    for (const [n, idx] of indices.entries()) {
+      const rigLabel = this.patchLabel(idx);
       onProgress({
         phase: 'backup',
-        current: idx + 1,
-        total: 48,
-        message: `Reading ${rigLabel} from Zoom MS-50G...`,
+        current: n + 1,
+        total: indices.length,
+        message: `${verb} ${rigLabel} from Zoom MS-50G...`,
       });
 
       try {
@@ -549,35 +563,72 @@ export class WebMidiService {
           };
         });
 
-        this.zoomOut.send([0xc0, idx]);
-        await sleep(delayMs);
-        this.zoomOut.send(buildPatchRequestSysex(this.zoomModelId));
+        if (opts.leaveEditorForPc) {
+          // Some firmware ignores Program Change while the editor is attached: step out, switch, step back in.
+          zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+          await sleep(60);
+        }
+        zoomOut.send([0xc0, idx]);
+        await sleep(settleMs);
+        if (opts.leaveEditorForPc) {
+          zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+          await sleep(80);
+        }
+        zoomOut.send(buildPatchRequestSysex(this.zoomModelId));
 
         const sysex146 = await dumpPromise;
-        raw48.push(decodePatchReadSysex(sysex146));
+        raw48[idx] = decodePatchReadSysex(sysex146);
       } catch (err) {
-        onProgress({
-          phase: 'error',
-          current: idx,
-          total: 48,
-          message: `Failed reading ${rigLabel} from MS-50G (${(err as Error).message}).`,
-        });
-        return {
-          ok: false,
-          userMessage: `Could not read ${rigLabel} from MS-50G (${(err as Error).message}).`,
-        };
+        try {
+          zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+        } catch {
+          // ignore
+        }
+        return { ok: false, label: rigLabel, error: (err as Error).message };
       }
     }
 
     try {
-      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
       await sleep(delayMs);
-      this.zoomOut.send([0xc0, 0]);
+      zoomOut.send([0xc0, 0]);
     } catch {
       // Ignore post-read exit-editor / PC return failure
     }
+    return { ok: true, raw48 };
+  }
 
-    const rigs = decompile48PatchesToRigs(raw48);
+  /**
+   * Reads all 48 managed patches (Rigs 01..12 + Shadow B/C/D) from a connected Zoom MS-50G
+   * using Program Change + `0x29` patch dump requests, preserving custom `.ZDL` fxids.
+   */
+  public async readAllFromHardware(
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number = 25,
+    timeoutMs: number = 600
+  ): Promise<{ ok: boolean; rigs?: GigRig[]; userMessage: string }> {
+    if (!this.zoomOut || !this.zoomIn) {
+      return {
+        ok: false,
+        userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB before reading rigs.',
+      };
+    }
+
+    const res = await this.readRaw48(onProgress, delayMs, timeoutMs, 'Reading');
+    if (!res.ok) {
+      onProgress({
+        phase: 'error',
+        current: 0,
+        total: 48,
+        message: `Failed reading ${res.label} from MS-50G (${res.error}).`,
+      });
+      return {
+        ok: false,
+        userMessage: `Could not read ${res.label} from MS-50G (${res.error}).`,
+      };
+    }
+
+    const rigs = decompile48PatchesToRigs(res.raw48);
     onProgress({
       phase: 'done',
       current: 48,
@@ -588,6 +639,75 @@ export class WebMidiService {
       ok: true,
       rigs,
       userMessage: 'Loaded all 12 Gig Rigs (including any Custom Pedals) from your Zoom MS-50G!',
+    };
+  }
+
+  /**
+   * Reads all 48 patches back after a sync and compares every pedal's On/Off and model against
+   * what Scene Studio intended to write. Returns plain-English mismatches ("Rig 01 Scene B: Pedal 2 ... OFF").
+   */
+  public async verifyZoomAgainstRigs(
+    rigs: GigRig[],
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number = 25,
+    timeoutMs: number = 600
+  ): Promise<{ ok: boolean; mismatches: string[]; userMessage: string; inconclusive?: boolean }> {
+    if (!this.zoomOut || !this.zoomIn) {
+      return { ok: false, mismatches: [], userMessage: 'MS-50G not connected — cannot verify.' };
+    }
+    // The MS-50G needs a moment to load a patch after a Program Change; a read that is too early returns the previous patch.
+    // So: read everything with a generous settle time, then re-read only the patches that differ, much more slowly.
+    const settle = delayMs > 0 ? Math.max(delayMs, 150) : 0;
+    const res = await this.readRaw48(onProgress, delayMs, Math.max(timeoutMs, settle > 0 ? 1500 : timeoutMs), 'Verifying', {
+      settleMs: settle,
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        mismatches: [],
+        userMessage: `Could not read back ${res.label} to verify (${res.error}).`,
+      };
+    }
+    let raw48 = res.raw48;
+    let detail = compareRigsToRaw48Detailed(rigs, raw48);
+    if (detail.messages.length > 0 && settle > 0) {
+      const again = await this.readRaw48(onProgress, delayMs, 2500, 'Re-checking', {
+        settleMs: 600,
+        indices: [...detail.patches].sort((x, y) => x - y),
+        leaveEditorForPc: true,
+      });
+      if (again.ok) {
+        raw48 = raw48.map((r, i) => again.raw48[i] ?? r);
+        detail = compareRigsToRaw48Detailed(rigs, raw48);
+      }
+    }
+    const mismatches = detail.messages;
+    if (mismatches.length === 0) {
+      return { ok: true, mismatches, userMessage: 'Verified: all 48 scene patches on the MS-50G match Scene Studio.' };
+    }
+    // If (nearly) every read returns the very same patch, the MS-50G is not switching patches for us: the read-back
+    // says nothing about what was saved, so it must not be reported as a failed write.
+    const names = raw48.map((r) => (r ? unpackRawPatch128(r).name : ''));
+    const counts = new Map<string, number>();
+    for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+    const [topName, topCount] = [...counts.entries()].sort((x, y) => y[1] - x[1])[0] ?? ['', 0];
+    if (topCount >= 24) {
+      return {
+        ok: false,
+        inconclusive: true,
+        mismatches,
+        userMessage: `Read-back inconclusive: the MS-50G answered ${topCount} of 48 patch requests with the same patch ("${topName}") instead of switching patches, so the saved patches could not be checked. The MS-50G did confirm saving each patch.`,
+      };
+    }
+    const held = [...detail.patches]
+      .sort((x, y) => x - y)
+      .slice(0, 3)
+      .map((i) => `${this.patchLabel(i)} holds "${unpackRawPatch128(raw48[i]).name}"`)
+      .join('; ');
+    return {
+      ok: false,
+      mismatches,
+      userMessage: `MS-50G read-back found ${mismatches.length} difference(s) in ${detail.patches.size} of 48 patches, even after a slower second read: ${mismatches.slice(0, 4).join(' · ')}${mismatches.length > 4 ? ' …' : ''}. [${held}]`,
     };
   }
 
@@ -607,6 +727,119 @@ export class WebMidiService {
         resolve(true);
       };
     });
+  }
+
+  /** Waits until the Chocolate Plus ACK counter moves past `baseline`, or times out. */
+  private waitForChocoAckAfter(baseline: number, timeoutMs: number): Promise<boolean> {
+    if (this.chocoAckCount > baseline) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const wake = () => {
+        if (this.chocoAckCount > baseline) {
+          clearTimeout(timer);
+          this.chocoAckWaiters.delete(wake);
+          resolve(true);
+        }
+      };
+      const timer = setTimeout(() => {
+        this.chocoAckWaiters.delete(wake);
+        resolve(this.chocoAckCount > baseline);
+      }, timeoutMs);
+      this.chocoAckWaiters.add(wake);
+    });
+  }
+
+  /**
+   * Sends every Chocolate Plus `09 49` write and REQUIRES an ACK for each one, retrying up to 3 times.
+   * Previously a missing ACK was silently ignored, so dropped writes (e.g. a whole switch's Short Tap)
+   * still reported "Sync complete".
+   */
+  private async programChocolate(
+    packets: Uint8Array[],
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number,
+    stepOffset: number,
+    totalSteps: number
+  ): Promise<{ ok: boolean; userMessage: string; failed: string[] }> {
+    const canVerify = Boolean(this.chocolateIn && delayMs > 0);
+    const ackTimeoutMs = 400;
+    const maxAttempts = 3;
+    const paceMs = delayMs > 1 ? (canVerify ? 10 : 40) : delayMs;
+    const failed: string[] = [];
+    let step = stepOffset;
+    let pktIdx = 0;
+
+    try {
+      for (let i = 0; i < packets.length; i++) {
+        pktIdx = i;
+        const pkt = packets[i];
+        const label = describeChocolateAddr(decodeChocolateWriteAddr(pkt));
+        onProgress({
+          phase: 'chocolate',
+          current: step + 1,
+          total: totalSteps,
+          message: `Configuring Chocolate Plus: ${label}...`,
+        });
+
+        if (!canVerify) {
+          this.chocolateOut!.send(pkt);
+          if (paceMs > 0) await sleep(paceMs);
+        } else {
+          let acked = false;
+          for (let attempt = 0; attempt < maxAttempts && !acked; attempt++) {
+            const baseline = this.chocoAckCount;
+            this.chocolateOut!.send(pkt);
+            acked = await this.waitForChocoAckAfter(baseline, ackTimeoutMs * (attempt + 1));
+            if (!acked) {
+              // Let any late ACK drain so it can't be mistaken for the next packet's ACK.
+              await sleep(250);
+              acked = this.chocoAckCount > baseline;
+            }
+          }
+          if (!acked && !failed.includes(label)) failed.push(label);
+          if (paceMs > 0) await sleep(paceMs);
+        }
+        step++;
+      }
+    } catch (err) {
+      this.chocolateOut = null;
+      if (this.chocolateIn) this.chocolateIn.onmidimessage = null;
+      this.chocolateIn = null;
+      this.notifyConnectionChange();
+
+      const msg = `USB connection dropped while configuring Chocolate Plus (step ${pktIdx + 1}/${packets.length}). Make sure its side switch is set to U and click Sync All again.`;
+      onProgress({ phase: 'error', current: step, total: totalSteps, message: msg });
+      return { ok: false, userMessage: `${msg} (${(err as Error).message})`, failed };
+    }
+
+    if (failed.length > 0) {
+      const msg = `Chocolate Plus did not confirm ${failed.length} setting(s): ${failed.slice(0, 6).join(', ')}${failed.length > 6 ? ' …' : ''}. Unplug and replug its USB (side switch on U), click Scan USB, then click Program Chocolate Plus.`;
+      onProgress({ phase: 'error', current: step, total: totalSteps, message: msg });
+      return { ok: false, userMessage: msg, failed };
+    }
+
+    const note = canVerify
+      ? 'Chocolate Plus confirmed every footswitch setting.'
+      : 'Chocolate Plus settings sent (its USB input port was not found, so writes could not be confirmed).';
+    return { ok: true, userMessage: note, failed };
+  }
+
+  /** Re-programs only the Chocolate Plus (no 48-patch MS-50G sync). */
+  public async configureChocolateOnly(
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number = 80
+  ): Promise<{ ok: boolean; userMessage: string }> {
+    if (!this.chocolateOut) {
+      return {
+        ok: false,
+        userMessage: 'Chocolate Plus is not connected. Plug it in via USB (side switch on U) and click Scan USB.',
+      };
+    }
+    const packets = buildChocolateLiveConfigPackets();
+    const res = await this.programChocolate(packets, onProgress, delayMs, 0, packets.length);
+    if (res.ok) {
+      onProgress({ phase: 'done', current: packets.length, total: packets.length, message: res.userMessage });
+    }
+    return { ok: res.ok, userMessage: res.userMessage };
   }
 
   /**
@@ -723,63 +956,33 @@ export class WebMidiService {
       }
     }
 
-    if (this.chocolateOut) {
-      let pktIdx = 0;
-      try {
-        const waitForChocoAck = Boolean(this.chocolateIn && delayMs > 0);
-        const ackTimeoutMs = delayMs > 1 ? 150 : 25;
-        const paceMs = delayMs > 1 ? 15 : delayMs;
-
-        const sendChocoPacket = (pkt: Uint8Array): Promise<boolean> => {
-          if (!waitForChocoAck) {
-            this.chocolateOut!.send(pkt);
-            return sleep(paceMs).then(() => true);
-          }
-          return new Promise<boolean>((resolve) => {
-            const t = setTimeout(() => {
-              if (this.pendingChocoAckResolve) {
-                this.pendingChocoAckResolve = null;
-                resolve(false);
-              }
-            }, ackTimeoutMs);
-            this.pendingChocoAckResolve = () => {
-              clearTimeout(t);
-              resolve(true);
-            };
-            this.chocolateOut!.send(pkt);
-          });
-        };
-
-        for (let i = 0; i < chocoPackets.length; i++) {
-          pktIdx = i;
-          onProgress({
-            phase: 'chocolate',
-            current: step + 1,
-            total: totalSteps,
-            message: 'Configuring Chocolate Plus footswitches & Salfini VP-1 Expression port...',
-          });
-          await sendChocoPacket(chocoPackets[i]);
-          if (paceMs > 0) await sleep(paceMs);
-          step++;
-        }
-      } catch (err) {
-        this.chocolateOut = null;
-        if (this.chocolateIn) this.chocolateIn.onmidimessage = null;
-        this.chocolateIn = null;
-        this.notifyConnectionChange();
-
-        const msg = `USB connection dropped while configuring Chocolate Plus (step ${pktIdx + 1}/${chocoPackets.length}). Make sure its side switch is set to U and click Sync All again.`;
-        onProgress({
-          phase: 'error',
-          current: step,
-          total: totalSteps,
-          message: msg,
-        });
-        return {
-          ok: false,
-          userMessage: `${msg} (${(err as Error).message})`,
-        };
+    let verifyNote = '';
+    let verifyFailure = '';
+    if (this.zoomOut && this.zoomIn && delayMs > 0) {
+      const verify = await this.verifyZoomAgainstRigs(rigs, (p) =>
+        onProgress({ ...p, phase: 'ms50g', current: step, total: totalSteps })
+      );
+      if (verify.ok) {
+        verifyNote = ' MS-50G read-back verified.';
+      } else if (verify.inconclusive) {
+        verifyNote = ` Note: ${verify.userMessage}`;
+      } else {
+        // A real mismatch: still program the Chocolate Plus (it is independent), then report the failure.
+        verifyFailure = verify.userMessage;
       }
+    }
+
+    if (this.chocolateOut) {
+      const choco = await this.programChocolate(chocoPackets, onProgress, delayMs, step, totalSteps);
+      step += chocoPackets.length;
+      if (!choco.ok) {
+        return { ok: false, userMessage: verifyFailure ? `${verifyFailure} ${choco.userMessage}` : choco.userMessage };
+      }
+    }
+
+    if (verifyFailure) {
+      onProgress({ phase: 'error', current: step, total: totalSteps, message: verifyFailure });
+      return { ok: false, userMessage: verifyFailure };
     }
 
     onProgress({
@@ -792,9 +995,52 @@ export class WebMidiService {
     return {
       ok: true,
       userMessage:
-        'Sync complete! Your 12 Gig Rigs, 48 Scene Snapshots, Chocolate Plus switches, and Salfini VP-1 Expression routing are ready for wireless stage play.',
+        `Sync complete! Your 12 Gig Rigs, 48 Scene Snapshots, Chocolate Plus switches, and Salfini VP-1 Expression routing are ready for wireless stage play.${verifyNote}`,
     };
   }
 }
 
 export const webMidiService = new WebMidiService();
+
+const PEDAL_SCENES = ['A', 'B', 'C', 'D'] as const;
+
+/** Compares intended rigs against 48 raw patches read back from the MS-50G (On/Off + pedal model per slot). */
+export function compareRigsToRaw48(rigs: GigRig[], raw48: Uint8Array[]): string[] {
+  return compareRigsToRaw48Detailed(rigs, raw48).messages;
+}
+
+export function compareRigsToRaw48Detailed(
+  rigs: GigRig[],
+  raw48: Uint8Array[]
+): { messages: string[]; patches: Set<number> } {
+  const out: string[] = [];
+  const bad = new Set<number>();
+  for (let r = 0; r < 12 && r < rigs.length; r++) {
+    const rig = rigs[r];
+    PEDAL_SCENES.forEach((scene, sIdx) => {
+      const patchIdx = sIdx === 0 ? r : 12 + r * 3 + (sIdx - 1);
+      const raw = raw48[patchIdx];
+      if (!raw) return;
+      const { slots6 } = unpackRawPatch128(raw);
+      const tag = `Rig ${String(r + 1).padStart(2, '0')} Scene ${scene}`;
+      const before = out.length;
+      if ((slots6[0].fxid & 0xffff) !== 0x0195) {
+        out.push(`${tag}: SCENE controller missing from slot 1`);
+      }
+      const intended = rig.scenes[scene];
+      for (let p = 0; p < 5; p++) {
+        const want = intended[p];
+        const got = slots6[p + 1];
+        const name = getEffectDefinition(want.fxid)?.shortName ?? `Pedal ${p + 1}`;
+        if (got.fxid !== want.fxid) {
+          const gotName = getEffectDefinition(got.fxid)?.shortName ?? `fx 0x${got.fxid.toString(16)}`;
+          out.push(`${tag}: Pedal ${p + 1} is ${gotName}, expected ${name}`);
+        } else if (got.enabled !== want.enabled) {
+          out.push(`${tag}: Pedal ${p + 1} (${name}) is ${got.enabled ? 'ON' : 'OFF'}, expected ${want.enabled ? 'ON' : 'OFF'}`);
+        }
+      }
+      if (out.length > before) bad.add(patchIdx);
+    });
+  }
+  return { messages: out, patches: bad };
+}

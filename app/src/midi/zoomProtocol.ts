@@ -303,6 +303,36 @@ function makeSceneSlot0(p1: number, p2: number, trim: number): PedalSlotState {
   };
 }
 
+/**
+ * Per-rig expression routing travels in the *name* of the Scene-B shadow record (the firmware engine REC_LOADs it into its DDR cache):
+ *   'E', slot, param, curve, minHi, minLo, maxHi, maxLo, ' ', ' '   - every field char is 0x30 + a nibble.
+ * slot = live slot 1..5 (0 = expression off); param = knob 1..9; curve 0 linear / 1 VP-1 / 2 swell; min/max = 0..100 %.
+ * Mirrors `encode_expression_meta` in firmware/midistomp_patch/scene_engine_asm.py.
+ */
+export function encodeExpressionMeta(exp: ExpressionConfig): string {
+  const slot = exp.targetSlot >= 2 && exp.targetSlot <= 6 ? exp.targetSlot - 1 : 0;
+  const param = Math.max(1, Math.min(9, Math.trunc(exp.targetParam)));
+  const curve = CURVE_TO_IDX[exp.curve] ?? 1;
+  const lo = Math.max(0, Math.min(100, Math.round(exp.minPct)));
+  const hi = Math.max(0, Math.min(100, Math.round(exp.maxPct)));
+  const nibbles = [slot, param, curve, lo >> 4, lo & 15, hi >> 4, hi & 15];
+  return 'E' + nibbles.map((n) => String.fromCharCode(0x30 + n)).join('') + '  ';
+}
+
+export function decodeExpressionMeta(name: string): ExpressionConfig | null {
+  if (name.length < 8 || name[0] !== 'E') return null;
+  const v: number[] = [];
+  for (let i = 1; i < 8; i++) v.push((name.charCodeAt(i) - 0x30) & 15);
+  const [slot, param, curve, loHi, loLo, hiHi, hiLo] = v;
+  return {
+    targetSlot: slot >= 1 && slot <= 5 ? slot + 1 : 0,
+    targetParam: Math.max(1, Math.min(9, param || 1)),
+    curve: IDX_TO_CURVE[curve] ?? 'vp1',
+    minPct: Math.min(100, (loHi << 4) | loLo),
+    maxPct: Math.min(100, (hiHi << 4) | hiLo),
+  };
+}
+
 export function compileRigsTo48Patches(rigs: GigRig[]): Uint8Array[] {
   if (rigs.length !== 12) {
     throw new Error(`Expected 12 Gig Rigs, got ${rigs.length}`);
@@ -311,13 +341,10 @@ export function compileRigsTo48Patches(rigs: GigRig[]): Uint8Array[] {
 
   for (let r = 0; r < 12; r++) {
     const rig = rigs[r];
-    const exp = rig.expression;
-    const encodedExpTarget =
-      exp.targetSlot >= 2 && exp.targetSlot <= 6
-        ? (exp.targetSlot - 2) * 9 + Math.max(1, Math.min(9, exp.targetParam))
-        : 0;
-    const curveIdx = CURVE_TO_IDX[exp.curve] ?? 1;
+    const tag = `R${String(r + 1).padStart(2, '0')}`;
 
+    // Slot 0 (SCENE.ZDL) of every record carries only that scene's TRIM; SCENE / EXPR stay 0.
+    // The firmware applies, from the cached record of the active scene: trim, on/off and all 9 knobs of slots 1..5.
     patches[r] = packRawPatch128(
       [makeSceneSlot0(0, 0, rig.sceneTrims.A), ...rig.scenes.A],
       rig.name.slice(0, 10),
@@ -325,20 +352,20 @@ export function compileRigsTo48Patches(rigs: GigRig[]): Uint8Array[] {
     );
 
     patches[12 + r * 3] = packRawPatch128(
-      [makeSceneSlot0(encodedExpTarget, curveIdx, rig.sceneTrims.B), ...rig.scenes.B],
-      `R${String(r + 1).padStart(2, '0')} SCN-B`,
+      [makeSceneSlot0(0, 0, rig.sceneTrims.B), ...rig.scenes.B],
+      encodeExpressionMeta(rig.expression),
       rig.tempo
     );
 
     patches[12 + r * 3 + 1] = packRawPatch128(
-      [makeSceneSlot0(exp.minPct, exp.maxPct, rig.sceneTrims.C), ...rig.scenes.C],
-      `R${String(r + 1).padStart(2, '0')} SCN-C`,
+      [makeSceneSlot0(0, 0, rig.sceneTrims.C), ...rig.scenes.C],
+      `${tag} SCN-C`,
       rig.tempo
     );
 
     patches[12 + r * 3 + 2] = packRawPatch128(
-      [makeSceneSlot0(2, r + 1, rig.sceneTrims.D), ...rig.scenes.D],
-      `R${String(r + 1).padStart(2, '0')} SCN-D`,
+      [makeSceneSlot0(0, 0, rig.sceneTrims.D), ...rig.scenes.D],
+      `${tag} SCN-D`,
       rig.tempo
     );
   }
@@ -361,26 +388,23 @@ export function decompile48PatchesToRigs(patches48: Uint8Array[]): GigRig[] {
     const pC = unpackRawPatch128(patches48[12 + r * 3 + 1]);
     const pD = unpackRawPatch128(patches48[12 + r * 3 + 2]);
 
-    const encodedExp = pB.slots6[0].params[0] ?? 0;
-    let expression: ExpressionConfig;
-    if (encodedExp >= 1 && encodedExp <= 45) {
-      const targetSlot = Math.floor((encodedExp - 1) / 9) + 2;
-      const targetParam = ((encodedExp - 1) % 9) + 1;
-      expression = {
-        targetSlot,
-        targetParam,
-        minPct: pC.slots6[0].params[0] ?? 0,
-        maxPct: pC.slots6[0].params[1] ?? 100,
-        curve: IDX_TO_CURVE[pB.slots6[0].params[1]] ?? 'vp1',
-      };
-    } else {
-      expression = {
-        targetSlot: 0,
-        targetParam: 1,
-        minPct: pC.slots6[0].params[0] ?? 0,
-        maxPct: pC.slots6[0].params[1] ?? 100,
-        curve: IDX_TO_CURVE[pB.slots6[0].params[1]] ?? 'vp1',
-      };
+    let expression: ExpressionConfig | null = decodeExpressionMeta(pB.name);
+    if (!expression) {
+      // Records written by firmware v1 kept the routing in slot-0 P1/P2 of the B and C records.
+      const encodedExp = pB.slots6[0].params[0] ?? 0;
+      const legacyCurve = IDX_TO_CURVE[pB.slots6[0].params[1]] ?? 'vp1';
+      const minPct = Math.min(100, pC.slots6[0].params[0] ?? 0);
+      const maxPct = Math.min(100, pC.slots6[0].params[1] ?? 100);
+      expression =
+        encodedExp >= 1 && encodedExp <= 45
+          ? {
+              targetSlot: Math.floor((encodedExp - 1) / 9) + 2,
+              targetParam: ((encodedExp - 1) % 9) + 1,
+              minPct,
+              maxPct,
+              curve: legacyCurve,
+            }
+          : { targetSlot: 0, targetParam: 1, minPct: 0, maxPct: 100, curve: 'vp1' };
     }
 
     const fallback = STARTER_TEMPLATES[r % STARTER_TEMPLATES.length].createRig(r);

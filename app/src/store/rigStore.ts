@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getEffectDefinition } from '../data/effectCatalog';
+import { getEffectDefinition, isGuitarAmpFxid } from '../data/effectCatalog';
 import { createDefault12Rigs, STARTER_TEMPLATES } from '../data/starterTemplates';
 import { webMidiService } from '../midi/webMidiService';
 import {
@@ -114,6 +114,8 @@ export interface RigStoreState {
   togglePedal: (pedalIdx0to4: number) => void;
   setPedalParam: (pedalIdx0to4: number, paramIdx0to8: number, value: number) => void;
   setPedalModel: (pedalIdx0to4: number, newFxid: number) => void;
+  /** Pairs a guitar amp with a cabinet (0 = cab off). Applies to all four scenes: the amp is one physical effect. */
+  setPedalCab: (pedalIdx0to4: number, cabId: number) => void;
   setExpression: (patch: Partial<ExpressionConfig>) => void;
   loadTemplateIntoActiveRig: (templateId: string) => void;
   loadRigsFromPedal: (rigs: GigRig[]) => void;
@@ -214,6 +216,19 @@ export const useRigStore = create<RigStoreState>((set, get) => ({
     const maxParams = def?.params.length ?? 3;
     if (rig.expression.targetSlot === pedalIdx0to4 + 2 && rig.expression.targetParam > maxParams) {
       rig.expression.targetParam = 1;
+    }
+    persistRigs(next);
+    set({ rigs: next });
+  },
+
+  setPedalCab: (pedalIdx0to4: number, cabId: number) => {
+    const { rigs, activeRigIndex } = get();
+    const next = cloneRigs(rigs);
+    const rig = next[activeRigIndex];
+    if (!isGuitarAmpFxid(rig.scenes.A[pedalIdx0to4].fxid)) return;
+    const value = Math.max(0, Math.min(511, Math.round(cabId)));
+    for (const sc of SCENE_IDS) {
+      rig.scenes[sc][pedalIdx0to4].params[7] = value;
     }
     persistRigs(next);
     set({ rigs: next });

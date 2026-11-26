@@ -12,6 +12,8 @@ interface TopSyncBarProps {
   onReadFromPedal: () => void;
   onOpenSetupGuide: () => void;
   onSyncAll: () => void;
+  onProgramChocolate: () => void;
+  onOpenFootswitchTest: () => void;
   onStatusToast: (msg: string) => void;
 }
 
@@ -24,6 +26,8 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
   onReadFromPedal,
   onOpenSetupGuide,
   onSyncAll,
+  onProgramChocolate,
+  onOpenFootswitchTest,
   onStatusToast,
 }) => {
   const exportRigPackJson = useRigStore((s) => s.exportRigPackJson);
@@ -113,6 +117,24 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
           style={{ display: 'none' }}
           onChange={handleFileChange}
         />
+        <button
+          type="button"
+          className="top-secondary-btn"
+          disabled={isSyncing || !chocolateConnected}
+          onClick={onProgramChocolate}
+          title="Re-send only the footswitch & expression settings to the Chocolate Plus (every write is confirmed)"
+        >
+          Program Chocolate Plus
+        </button>
+        <button
+          type="button"
+          className="top-secondary-btn"
+          disabled={isSyncing}
+          onClick={onOpenFootswitchTest}
+          title="See exactly what each Chocolate Plus switch sends"
+        >
+          Footswitch Test
+        </button>
         <button type="button" className="top-guide-btn" onClick={onOpenSetupGuide}>
           ⚡ Wireless & Setup Guide
         </button>

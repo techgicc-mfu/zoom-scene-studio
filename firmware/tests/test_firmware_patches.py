@@ -16,11 +16,12 @@ def test_rig_wrap_12_never_enters_shadow_patches():
 
 def test_vp1_curve_deadzone_and_saturation():
     assert vp1_curve_map(0, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 20
-    assert vp1_curve_map(3, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 20
-    mid = vp1_curve_map(52, curve_mode=1, exp_min=20, exp_max=80, param_max=100)
-    assert 45 <= mid <= 55
+    assert vp1_curve_map(2, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 20   # heel dead-zone
+    assert vp1_curve_map(41, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 51
+    assert vp1_curve_map(79, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 80  # saturates before the toe
     assert vp1_curve_map(100, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 80
-    assert vp1_curve_map(127, curve_mode=1, exp_min=20, exp_max=80, param_max=100) == 80
+    assert vp1_curve_map(100, curve_mode=0, exp_min=100, exp_max=0, param_max=8000) == 0  # reversed pedal
+    assert vp1_curve_map(50, curve_mode=0, exp_min=0, exp_max=100, param_max=8000) == 4000
 
 
 def test_scene_diff_only_touches_changed_params_and_skips_flash_mid_song():
@@ -84,16 +85,10 @@ def test_generated_yaml_patches_valid_and_32b_aligned(tmp_path: Path):
     assert has_32bit_const(se_words, 0xC00D6B00)  # SEM_POST
     assert has_32bit_const(se_words, 0xC00CBF40)  # EVENT_POST
 
-    # Verify fixed C674x opcodes in scene-engine:
-    # - add_lcst(0, 10, 12, 10) = 0x05298058 (a10 = 3*r + 12, never src2=a12!)
-    # - add_lcst(0, 10, 0..2, 4) = 0x02280058 / 0x02282058 / 0x02284058
-    # - mvk_l(1, -1, 4) = 0x027CA35A (matches handler.S BIOS_WAIT_FOREVER)
-    # - shru_s(0, 6, 16, 6) = 0x031A09A0 (op=0x09A0 for raw[s*18] bit extraction, never broken 0x0220)
     assert has_32bit_const(se_words, 0x02000195)  # 28-bit MSOG SCENE.ZDL live patch slot ID
-    assert 0x05298058 in se_words
-    assert {0x02280058, 0x02282058, 0x02284058}.issubset(se_words)
-    assert 0x027CA35A in se_words
-    assert 0x031A09A0 in se_words
+    assert 0x027CA35A in se_words                 # mvk .L2 -1,b4 = BIOS_WAIT_FOREVER for SEM_PEND (handler.S)
+    assert has_32bit_const(se_words, 0xC00B056C)  # FX_PARAM_DESC (expression routing reads the target's max)
+    assert len(se_sec) >= 4096                    # trim + 5 slots x (9 knobs + on/off) + expression + curve table
 
     # Critical #1: no-scene-autosave.yaml must chain IS_DIRTY (0xC00ACBC4 -> tempo-hold 0xC00D47B0),
     # Task_MIDI PC call site (0xC00AEE90 -> midi-settings 0xC00B2D0C), and check Slot 0 fxid == 0x0195

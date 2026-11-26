@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from firmware.midistomp_patch.scene_engine_asm import expr_value
 from firmware.scene_zdl.build_zdl import SCENE_FXID
 
 RIG_COUNT = 12
@@ -16,43 +17,22 @@ def wrap_rig_step(cur_patch: int, delta: int) -> int:
 
 
 def vp1_curve_map(
-    cc_val: int,
+    expr: int,
     curve_mode: int,
     exp_min: int,
     exp_max: int,
     param_max: int,
 ) -> int:
-    """Maps incoming CC 16 (0..127) from Salfini VP-1 into target parameter units (0..param_max).
+    """Maps the live EXPR value (0..100, SCENE.ZDL's CC16 parameter) to the target parameter, in the engine's integer math.
 
-    curve_mode:
-      0 = Linear (0..127 -> 0.0..1.0)
-      1 = Salfini VP-1 Compensated (heel deadzone 0..3 -> 0.0; saturates smoothly at 100/127 ~78% travel)
-      2 = Sunday Worship Swell (heel deadzone + quadratic x^2 audio taper)
+    curve_mode: 0 = linear, 1 = Salfini VP-1 compensated (heel dead-zone <= 2, saturates at 79),
+                2 = swell (VP-1 compensated, then squared).
+    exp_min / exp_max are percentages (min > max reverses the pedal).
     """
-    raw = max(0, min(127, int(cc_val)))
-    lo_pct = max(0, min(100, int(exp_min)))
-    hi_pct = max(0, min(100, int(exp_max)))
-    pmax = max(1, int(param_max))
-
-    if curve_mode == 1:
-        if raw <= 3:
-            norm = 0.0
-        elif raw >= 100:
-            norm = 1.0
-        else:
-            norm = (raw - 3) / 97.0
-    elif curve_mode == 2:
-        if raw <= 3:
-            norm = 0.0
-        else:
-            lin = min(1.0, (raw - 3) / 97.0)
-            norm = lin * lin
-    else:
-        norm = raw / 127.0
-
-    pct = lo_pct + norm * (hi_pct - lo_pct)
-    scaled = int(round((pct / 100.0) * pmax))
-    return max(0, min(pmax, scaled))
+    lo = max(0, min(100, int(exp_min)))
+    hi = max(0, min(100, int(exp_max)))
+    pmax = max(0, int(param_max))
+    return max(0, min(pmax, expr_value(expr, curve_mode, lo, hi, pmax)))
 
 
 class SceneEngineSimulator:
