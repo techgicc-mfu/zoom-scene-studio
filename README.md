@@ -29,6 +29,27 @@ To achieve **gapless 4-scene (`A / B / C / D`) switching** on original MS-50G ha
 
 ---
 
+## 🧠 Why Shadow Patches? (How `SCENE.ZDL` & Memory Achieve Gapless Switching)
+
+### Why Shadow Patches (`13–48`) Are Needed
+The stock Zoom MS-50G only stores **one** set of On/Off states and knob settings per patch (`01–50`), and changing patches normally triggers a Program Change that reads flash memory and tears down / reloads DSP effects — causing an audible **audio gap/dropout**.
+
+To give each of the **12 Gig Rigs** four complete scenes without changing the pedal's flash storage format:
+* **Patches `01–12`** hold **Scene A** (the playable rig you step between).
+* **Patches `13–48`** act as **Shadow Scene Memory** (`12 + 3 × rig + {0, 1, 2}`), storing **Scenes B, C, and D** for each rig (plus per-rig expression routing encoded in Scene B's patch name).
+* **Patches `49–50`** are left unused.
+
+### How `SCENE.ZDL` & the `scene-engine` Work in Memory
+1. **`SCENE.ZDL` (`Slot 1`) acts as the live CC anchor:** Rather than triggering a Program Change, your Chocolate Plus sends **`CC 15`** (`SCENE`: `0=A, 1=B, 2=C, 3=D`), **`CC 16`** (`EXPR`: expression sweep), and **`CC 17`** (`TRIM`: solo dB boost) straight to `SCENE.ZDL`'s parameters in live slot memory (`OS_ACTIVE_SLOTS` at `0xC009BF58`). Because it is only a parameter change, the MS-50G **never reloads the patch or interrupts audio**.
+2. **Pre-cached once into DDR RAM on Rig Load:** Whenever you load a new Rig (`01–12`), the firmware's **`scene-engine`** patch (`0xC0110200`) calls `OS_REC_LOAD` **once** for all 4 flash records (Scene A + its 3 shadow patches B/C/D) and pins all four 256-byte snapshots into fast **DDR RAM** (`ADDR_SHADOW_CACHE` at `0xC0120100`).
+3. **Instant zero-flash-I/O scene swaps (16 ms poll):** When `CC 15` changes `SCENE.ZDL`'s `SCENE` parameter, `scene-engine` spots the change, reads the target scene directly from **DDR RAM** (`0xC0120100 + scene × 256`), and updates the already-loaded effects in-place via `OS_FX_SET_PARAM` (with zero flash reads and zero DSP tear-down):
+   * Applies Scene **Trim** to Slot 1 (`SCENE.ZDL`).
+   * Sets **all 9 knobs (`P0–P8`)** on Slots `2–6` *first* (skipping `P7` on Guitar Amps so your loaded CAB stays intact).
+   * Toggles each effect's **On/Off** bit *last* (so pedals turn on with their new knob values already loaded) and refreshes the screen.
+4. **No dropout or accidental overwrites:** Firmware guards suppress redundant reloads if a PC matches the active rig (`ADDR_PC_GUARD`) and disable `AUTO SAVE` while on Scenes B/C/D (`ADDR_AUTOSAVE_GUARD`) so temporary scene tweaks don't overwrite flash.
+
+---
+
 ## Quick Start (Everyday Use)
 
 1. Double-click **`Start-Scene-Studio.bat`** to open **MS-50G Scene Studio** in a standalone desktop window.
