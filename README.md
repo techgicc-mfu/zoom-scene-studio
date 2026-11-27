@@ -77,3 +77,9 @@ To give each of the **12 Gig Rigs** four complete scenes without changing the pe
 📖 **Read the complete [Step-by-Step Setup Tutorial (`docs/TUTORIAL.md`)](docs/TUTORIAL.md)** before starting (includes mandatory backup instructions, firmware flashing, `SCENE.ZDL` injection, Wireless MIDI-B setup, and recovery steps).
 
 Quick reference: run `.\scripts\build-firmware.ps1` (or click **⚡ Wireless & Setup Guide** inside the app) for the one-time `MIDISTOMP V2.0` + `dist\SCENE.ZDL` installation and `MIDI-B` Host Mode check.
+
+---
+
+## 🙏 Credits & Upstream Projects
+
+* **[matujuice / zoom-ms-midistomp](https://github.com/matujuice/zoom-ms-midistomp)** — Built directly on top of **MIDISTOMP 2.0** (`ms70cdr-2.10` unified custom firmware, MIDI CC control, `zoomms` patcher toolchain, and reverse-engineered Zoom OS internals). All core MIDISTOMP OS capabilities belong to **matujuice**.

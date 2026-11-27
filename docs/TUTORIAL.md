@@ -154,3 +154,9 @@ cd ..
 - **Chocolate Plus doesn't trigger MS-50G wirelessly:** Confirm MIDI-B is in **`Host Only`** mode, its LED is **solid**, the OTG Y-cable has 5V power, and the MS-50G has **MIDI Ch = OMNI**, **CC Receive = ON**, **PC Receive = ON**.
 - **WebMIDI doesn't see a pedal:** Make sure you are using **Chrome or Edge** (not Firefox/Safari), close CubeSuite / Zoom Effect Manager (Windows locks USB MIDI ports to one app at a time), and verify your USB cable is a **data** cable.
 - **Recovering to Stock Firmware:** If the modded firmware ever misbehaves and the pedal still enters bootloader mode, hold **UP (`▲`) + DOWN (`▼`)** while plugging in Mini-USB and run Zoom's **official unmodified MS-50G updater** to restore stock firmware. *(Note: this will not recover a hardware-bricked bootloader, so always flash carefully.)*
+
+---
+
+## Credits
+
+- **MIDISTOMP 2.0 Custom Firmware:** Huge thanks to **[matujuice / zoom-ms-midistomp](https://github.com/matujuice/zoom-ms-midistomp)** for the `MIDISTOMP 2.0` unified OS, MIDI CC control architecture, and firmware patcher tooling that makes this project possible.
