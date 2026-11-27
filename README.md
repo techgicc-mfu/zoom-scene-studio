@@ -11,6 +11,24 @@ A complete gapless **4-Scene (`A / B / C / D`) + Wireless Expression** system bu
 
 ---
 
+## ⚠️ Trade-Offs & What You Sacrifice
+
+To achieve **gapless 4-scene (`A / B / C / D`) switching** on original MS-50G hardware, this system repurposes the pedal's patch memory and effect slots:
+
+| Resource | Normal Stock MS-50G | With Scene Studio (`MIDISTOMP` + `SCENE.ZDL`) |
+|---|---|---|
+| **Playable Patches** | 50 independent patches (`01–50`) | **Only 12 Gig Rigs (`01–12`)** (with 4 scenes each = 48 tone variations) |
+| **Slots `13–48` (36 slots)** | User patches | **Sacrificed as Shadow Scene Memory** (stores Scene **B, C, D** snapshots for Rigs 01–12) |
+| **Slots `49–50` (2 slots)** | User patches | **Left empty / unused** (unmanaged by Scene Studio; skipped by `CC 80/81` rig stepping) |
+| **Effect Slots per Patch** | Up to 6 effects | **5 effects (`Slots 2–6`)** — Slot 1 is reserved for **`SCENE.ZDL`** |
+| **Hardware Editing** | Edit & Auto-Save directly on pedal | **Edit in Scene Studio UI** (auto-save is suppressed on Scenes B/C/D; Scene A caches on load) |
+| **Per-Scene Differences** | N/A | All 4 scenes in a rig share the same 5 effect models and Guitar Amp CAB setting (scenes change **On/Off, knobs, and Trim**) |
+
+* **Firmware rig stepping is clamped to 12:** Holding `A/B` wraps strictly within `01–12` (`rig-wrap-12`), so `13–50` are unreachable via normal rig stepping.
+* **Synced data overwrites your gear:** Clicking `SYNC ALL TO PEDALS` overwrites **MS-50G slots `01–48`** and reprograms your **M-Vave Chocolate Plus** switches.
+
+---
+
 ## Quick Start (Everyday Use)
 
 1. Double-click **`Start-Scene-Studio.bat`** to open **MS-50G Scene Studio** in a standalone desktop window.
