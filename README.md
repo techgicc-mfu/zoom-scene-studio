@@ -1,5 +1,8 @@
 # 🎸 Zoom MS-50G Scene Studio & `SCENE.ZDL`
 
+> [!CAUTION]
+> **USE AT YOUR OWN RISK:** This project flashes **unofficial, modified firmware** onto your Zoom MS-50G and overwrites **patches `01–48`** (plus your Chocolate Plus config) when syncing. Improper flashing or power loss can **brick your pedal**, and syncing **will delete/overwrite saved patches**. Always **back up your patches first** and proceed strictly at your own risk.
+
 A complete gapless **4-Scene (`A / B / C / D`) + Wireless Expression** system built for an old-school guitarist playing **Classic Rock, Blues, Pop, and Sunday Worship** on:
 * **Original Zoom MS-50G**
 * **M-Vave Chocolate Plus** (4-switch wireless MIDI foot controller)
@@ -30,6 +33,8 @@ A complete gapless **4-Scene (`A / B / C / D`) + Wireless Expression** system bu
 
 ---
 
-## One-Time Firmware Setup
+## One-Time Firmware Setup & Full Tutorial
 
-Run PowerShell script `.\scripts\build-firmware.ps1` (or click **⚡ Wireless & Setup Guide** inside the app) for the 3-step one-time `MIDISTOMP V2.0` + `dist\SCENE.ZDL` installation and `MIDI-B` Host Mode check.
+📖 **Read the complete [Step-by-Step Setup Tutorial (`docs/TUTORIAL.md`)](docs/TUTORIAL.md)** before starting (includes mandatory backup instructions, firmware flashing, `SCENE.ZDL` injection, Wireless MIDI-B setup, and recovery steps).
+
+Quick reference: run `.\scripts\build-firmware.ps1` (or click **⚡ Wireless & Setup Guide** inside the app) for the one-time `MIDISTOMP V2.0` + `dist\SCENE.ZDL` installation and `MIDI-B` Host Mode check.
