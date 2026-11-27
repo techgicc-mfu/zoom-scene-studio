@@ -14,6 +14,7 @@ interface TopSyncBarProps {
   onSyncAll: () => void;
   onProgramChocolate: () => void;
   onOpenFootswitchTest: () => void;
+  onOpenLibrary?: () => void;
   onStatusToast: (msg: string) => void;
 }
 
@@ -28,6 +29,7 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
   onSyncAll,
   onProgramChocolate,
   onOpenFootswitchTest,
+  onOpenLibrary,
   onStatusToast,
 }) => {
   const exportRigPackJson = useRigStore((s) => s.exportRigPackJson);
@@ -135,6 +137,11 @@ export const TopSyncBar: React.FC<TopSyncBarProps> = ({
         >
           Footswitch Test
         </button>
+        {onOpenLibrary && (
+          <button type="button" className="top-secondary-btn" onClick={onOpenLibrary}>
+            📚 Device Library
+          </button>
+        )}
         <button type="button" className="top-guide-btn" onClick={onOpenSetupGuide}>
           ⚡ Wireless & Setup Guide
         </button>

@@ -1,45 +1,64 @@
-# Zoom MS-50G Scene Studio — Step-by-Step Setup Tutorial
+# Scene Studio — Step-by-Step Guide (Plain English)
+
+This guide is for guitar players, not programmers. Follow it from top to bottom the first time. After the one-time setup, everyday use is only Part 3.
 
 > [!CAUTION]
-> **READ THIS BEFORE YOU START — DO THIS AT YOUR OWN RISK!**
+> **Read this first. You do this at your own risk.**
 >
-> 1. **Possibility of Bricking Your Device:** This guide involves flashing **unofficial, modified firmware** (`MIDISTOMP V2.0` + custom `SCENE.ZDL`) onto your Zoom MS-50G. A power interruption, loose USB cable, wrong updater file, or unexpected hardware variance can **corrupt or permanently brick your pedal** and will void any manufacturer warranty.
-> 2. **Your Saved Patches Will Be Overwritten / Deleted:**
->    - Flashing firmware or injecting effects can **erase all existing patches and effects** on your MS-50G.
->    - Clicking **`SYNC ALL TO PEDALS`** in Scene Studio overwrites **all 48 managed patch slots (`01–48`)** on your MS-50G (`01–12` = Gig Rigs, `13–48` = Shadow Scenes B/C/D) and overwrites your **M-Vave Chocolate Plus** switch configuration.
-> 3. **No Warranty or Liability:** By following this tutorial, you accept full responsibility for any data loss or hardware damage. **Back up your patches first and proceed strictly at your own risk.**
+> 1. **Your pedal can be damaged ("bricked").** Part 1 installs unofficial, modified software (firmware) on your Zoom MS-50G. If the power or USB cable is pulled during the install, the pedal may stop working for good. It also voids any warranty.
+> 2. **Your saved patches get replaced.** Pressing **SYNC ALL TO PEDALS** overwrites patches **01 to 48** on the MS-50G and replaces the settings inside your M-Vave Chocolate Plus. Back up first.
+> 3. **No warranty.** You accept all responsibility for anything that goes wrong.
 
 ---
 
-## What You Need
+## What this does, in one minute
 
-### Hardware
-- **Original Zoom MS-50G** (not MS-50G+ / MS-70CDR+) + **9V DC power adapter** + **Mini-USB data cable** (make sure it supports data, not charge-only)
-- **M-Vave Chocolate Plus** (`FootCtrlPlus`) + **USB-C data cable**
-- **M-Vave Wireless MIDI (`MIDI-B`)** + **Powered USB OTG Y-Cable** + **5V USB charging brick** (for wireless stage use)
-- *(Optional)* **Salfini VP-1** (or standard 1/4" TRS expression pedal) + **1/4" Stereo TRS cable**
+- You get **12 "rigs"** (think: 12 songs or 12 sounds). Each rig has **4 scenes: A, B, C, D**.
+- A scene is a snapshot: which pedals are on, and where each knob sits.
+- Tap a footswitch and the sound changes **instantly, with no gap**.
+- The price: instead of 50 normal patches you get 12 rigs × 4 scenes, and each rig uses 5 effects (the first slot is taken by a small helper effect called SCENE).
 
-### Software (Windows PC)
-- **Google Chrome** or **Microsoft Edge** (required for WebMIDI)
-- **Python 3.10+** and **Node.js 18+**
-- **Zoom Effect Manager** (for injecting `SCENE.ZDL` and managing effects)
-- **Official `ZOOM MS-70CDR v2.10 Updater.exe`** downloaded directly from Zoom's official website *(not bundled in this repo)*
+### What each footswitch does
 
----
-
-## Step 1: Back Up Your Existing Patches (Do Not Skip!)
-
-Before flashing anything or clicking Sync:
-1. Connect your **Zoom MS-50G** to your PC via Mini-USB.
-2. Open **Zoom Effect Manager** or **zoom-ms-utility** (`https://g200kg.github.io/zoom-ms-utility/`) in Chrome/Edge.
-3. Export and save a full backup of all **50 patches** on your pedal to a safe folder on your computer.
-4. *(Optional)* If you have custom settings on your **M-Vave Chocolate Plus**, open **CubeSuite** and export a `.fcp` backup first.
+| You do this | This happens |
+|---|---|
+| Tap **A / B / C / D** | Switches to Scene A / B / C / D |
+| Hold **A** | Previous rig |
+| Hold **B** | Next rig |
+| Hold **C** | Tuner on or off |
+| Hold **D** | Tap tempo |
+| Move the **expression pedal** | Controls the knob you picked for that rig (for example wah, or reverb mix) |
 
 ---
 
-## Step 2: Download the Project & Install Dependencies
+## What you need
 
-Open PowerShell in the folder where you want to keep Scene Studio:
+**Hardware**
+- Zoom MS-50G and its 9V power adapter
+- A Mini-USB cable that carries **data** (some cables only charge and will not work)
+- M-Vave Chocolate Plus and a USB-C data cable
+- Optional: Salfini VP-1 expression pedal and a **stereo (TRS)** 1/4" cable — see "Cable warning" below
+- For wireless use on stage: M-Vave MIDI-B, a powered USB OTG Y-cable, and a 5V USB charger
+
+**On your computer (Windows)**
+- Google Chrome or Microsoft Edge. Firefox and Safari will not work.
+- Python 3.10 or newer, and Node.js 18 or newer
+- The official `ZOOM MS-70CDR v2.10 Updater.exe` from Zoom's website (it is not included here)
+
+> **Cable warning:** the expression pedal needs a **TRS** cable (the plug has **two** black rings near the tip). A normal guitar cable (one ring) will give you **no signal at all**.
+
+---
+
+# PART 1 — One-time setup (do this once)
+
+### Step 1: Back up your pedal
+1. Connect the MS-50G to your computer with the Mini-USB cable.
+2. Open Zoom Effect Manager, or the free web tool `https://g200kg.github.io/zoom-ms-utility/` in Chrome or Edge.
+3. Save a backup of all 50 patches to a folder you will remember.
+4. If you have settings on your Chocolate Plus that you care about, export them from the CubeSuite app first.
+
+### Step 2: Get the project
+Open PowerShell in the folder where you keep your projects and run:
 
 ```powershell
 git clone https://github.com/techgicc-mfu/zoom-scene-studio.git
@@ -50,113 +69,152 @@ npm install
 cd ..
 ```
 
----
+### Step 3: Build the updater
+1. Put the official `ZOOM MS-70CDR v2.10 Updater.exe` in the main `zoom-scene-studio` folder.
+2. Run `.\scripts\build-firmware.ps1`.
+3. Double-click `Build-Scene-Updater.bat`. It makes `dist\MIDISTOMP-V2.0-Scene-Studio-Updater.exe`.
 
-## Step 3: Build the Modded Firmware Updater
+### Step 4: Install the modified firmware on the MS-50G
+> **Do not unplug anything, and do not let the computer sleep, until it says 100%.**
 
-1. Download the official **`ZOOM MS-70CDR v2.10 Updater.exe`** from Zoom and place it in the root `zoom-scene-studio` folder.
-2. Generate the firmware patches (and rebuild `dist\SCENE.ZDL` if desired — a pre-built `dist\SCENE.ZDL` is already included):
-   ```powershell
-   .\scripts\build-firmware.ps1
-   ```
-3. Double-click **`Build-Scene-Updater.bat`** (or drag `ZOOM MS-70CDR v2.10 Updater.exe` onto it).
-   - This creates **`dist\MIDISTOMP-V2.0-Scene-Studio-Updater.exe`**.
+1. Unplug the power and the USB from the pedal.
+2. Hold the **UP and DOWN** buttons on the pedal together.
+3. While still holding, plug in the Mini-USB cable. Then let go.
+4. Run `dist\MIDISTOMP-V2.0-Scene-Studio-Updater.exe` and click **Execute / Update**.
+5. Wait for **100% Complete**, close it, then unplug the USB.
 
----
+### Step 5: Put the SCENE effect on the pedal
+1. Open **Zoom Effect Manager** and connect the pedal.
+2. Add `dist\SCENE.ZDL` (it shows up as **SCENE**).
+3. Also keep the amps, drives, delays and reverbs you want to use.
+4. Write it to the pedal and wait until it finishes completely.
 
-## Step 4: Flash the Modded Firmware to Your Zoom MS-50G
+### Step 6: Check the pedal's MIDI settings
+Power the pedal on normally and make sure: **MIDI Channel = OMNI** (or 1), **CC Receive = ON**, **PC Receive = ON**.
 
-> [!WARNING]
-> **Do NOT unplug the USB cable, turn off your PC, or interrupt power during flashing.** Interrupting a firmware flash is the #1 cause of bricking a pedal.
-
-1. Unplug power and USB from your **Zoom MS-50G**.
-2. Hold down both the **UP (`▲`) and DOWN (`▼`)** arrow buttons on the MS-50G simultaneously.
-3. While holding both buttons, plug the **Mini-USB cable** from your PC into the MS-50G.
-   - The screen should show **"Ready for firmware update"** (or stay in update mode). Release the buttons.
-4. Run **`dist\MIDISTOMP-V2.0-Scene-Studio-Updater.exe`** and click **Execute / Update**.
-5. Wait until the updater reports **100% Complete**, then close it and unplug USB.
-
----
-
-## Step 5: Install `SCENE.ZDL` via Zoom Effect Manager
-
-1. Open **Zoom Effect Manager** on your PC and connect your MS-50G in update mode (or as prompted by Zoom Effect Manager).
-2. Add **`dist\SCENE.ZDL`** (`fxid 0x0195`, displays as `SCENE`) to your pedal's effect list.
-3. Ensure the amps, drives, delays, and reverbs you plan to use in your rigs are also selected/installed.
-4. Write the effect set to your MS-50G and wait for it to finish completely.
+### Step 7 (wireless only): Set up the MIDI-B stick
+1. Power the MIDI-B and open the CubeSuite phone app.
+2. Switch MIDI-B to **Host Mode** (it remembers this).
+3. On stage: charger → Y-cable power leg; MIDI-B → Y-cable USB-A port; Y-cable Mini-USB → MS-50G.
 
 ---
 
-## Step 6: Configure MS-50G MIDI Settings
+# PART 2 — First sync (connect, edit, send)
 
-1. Power on your MS-50G normally (9V adapter).
-2. Open the **MIDISTOMP / System MIDI** menu on the pedal and verify:
-   - **MIDI Channel:** `OMNI` (or `Ch 1`)
-   - **CC Receive:** `ON`
-   - **PC Receive:** `ON`
+### Step 8: Open the app
+1. Double-click `Start-Scene-Studio.bat`. The app opens in your browser.
+2. Plug in **both** pedals by USB. Set the Chocolate Plus **side switch to U**.
+3. Click **Scan USB**. Both badges at the top should turn green:
+   "MS-50G Connected" and "Chocolate Plus Connected".
 
----
+### Step 9: Make your sounds
+- The list on the left is your **12 rigs**. Click one.
+- Click **Switch A, B, C or D** to edit that scene. Turn pedals on/off and move the knobs. A gold ★ marks a knob that is different from Scene A.
+- Pick effects from the drop-down lists. They show the effects that are installed on **your** pedal.
+- Want a head start? Use the genre templates (Classic Rock, Blues, Pop, Worship, Modern Metal, Country, Indie, Jazz/Neo-Soul).
+- Pick which knob the expression pedal controls for that rig.
 
-## Step 7: Launch Scene Studio & Sync Both Pedals
+### Step 10: Hear it before you save it (Audition)
+1. Click **🔊 Audition this scene (not saved)**.
+2. Whatever you change now, you hear right away on the pedal. Nothing is saved.
+3. To move to another scene, **just click that scene**. You do not need to stop first. It keeps playing what you are editing.
+4. When you are done, click **■ Stop audition**.
 
-> [!WARNING]
-> Clicking **`SYNC ALL TO PEDALS`** will **overwrite patches `01–48`** on your Zoom MS-50G and reprogram all 4 footswitches + expression settings on your M-Vave Chocolate Plus. Make sure you completed **Step 1 (Backup)**!
+### Step 11: Watch the DSP meter
+Next to the Audition button you will see something like **DSP ≈ 71 / 100**. Think of it as "how full the pedal's brain is".
+- Green = fine. Orange = getting heavy. Red / over 100 = too much.
+- Big reverbs and amps are the heavy ones. An effect costs the same whether it is on or off.
+- This is an **estimate**. The pedal has the final say.
 
-1. Double-click **`Start-Scene-Studio.bat`** in the `zoom-scene-studio` folder.
-   - This launches Scene Studio in Chrome/Edge at `http://127.0.0.1:5173`.
-2. Plug **both** pedals into your PC via USB:
-   - **Zoom MS-50G** (Mini-USB)
-   - **M-Vave Chocolate Plus** (USB-C, with its side switch set to **`U`**)
-3. Click **`Scan USB`** at the top of Scene Studio and confirm both pedals show as connected.
-4. Customize your **12 Gig Rigs** (each with **4 Scenes: A, B, C, D**):
-   - Toggle pedals ON/OFF and dial knobs per scene (gold `★` shows knobs modified from Scene A).
-   - Select your Guitar Amp **CAB** model from the dropdown.
-   - Set per-scene **Solo Trim** (`-6.0 dB` to `+6.0 dB`).
-   - Pick which slot/parameter your **Expression Pedal** controls per rig.
-5. Click **`SYNC ALL TO PEDALS`** and wait until the progress bar finishes **100%** (do not unplug either pedal while syncing).
-6. *(Optional)* Use the built-in **Footswitch Tester** in Scene Studio to verify your Chocolate Plus sends the expected scene/rig/tuner CCs.
+### Step 12: Send it to the pedals
+1. Click **SYNC ALL TO PEDALS** (top right).
+2. Wait for the bar to reach 100%. **Do not unplug anything while it runs.**
+3. When it finishes you will see a message that the Chocolate Plus confirmed every footswitch setting.
 
----
-
-## Step 8: Stage Wiring (Wireless MIDI + Expression)
-
-1. **Configure M-Vave Wireless MIDI-B:**
-   - Using the M-Vave / Sinco app, set your Wireless MIDI-B adapter mode to **`Host Only`**.
-2. **At your MS-50G / pedalboard:**
-   - Power the MS-50G with its **9V DC adapter**.
-   - Connect a **Powered USB OTG Y-Cable**:
-     - Power leg → **5V USB charging brick**
-     - USB-A Host port → **M-Vave Wireless MIDI-B**
-     - Mini-USB plug → **Zoom MS-50G**
-3. **At your feet (M-Vave Chocolate Plus):**
-   - Unplug USB-C from the Chocolate Plus and power it on in wireless mode.
-   - Wait for the Wireless MIDI-B LED to turn **solid** (paired with Chocolate Plus).
-   - *(Optional Salfini VP-1 Expression)* Leave the VP-1 `INPUT` jack **empty**, and run a **1/4" Stereo TRS cable** from VP-1 `OUTPUT` into the Chocolate Plus `PEDAL` jack.
+### Step 13: Test the footswitch
+1. Click **Footswitch Test**.
+2. Tap A, B, C, D, then hold each. Each should light up green and show the right message.
+3. Move the expression pedal heel to toe. The **Expression pedal bar** should move from 0 to 127 and say "full sweep ✓".
 
 ---
 
-## Step 9: Live Footswitch Controls
+# PART 3 — Everyday use
 
-| Footswitch Action | Function |
-|---|---|
-| **Short Tap `A / B / C / D`** | Instant gapless switch to **Scene A, B, C, or D** |
-| **Long Hold `A`** | **Previous Gig Rig** (`01–12`, wraps cleanly without entering shadow slots `13–48`) |
-| **Long Hold `B`** | **Next Gig Rig** (`01–12`) |
-| **Long Hold `C`** | **Silent Tuner** On / Off |
-| **Long Hold `D`** | **Tap Tempo** |
-| **Expression Pedal (`TRS`)** | Sweeps the active rig's assigned pedal knob (`CC 16`) |
+1. Double-click `Start-Scene-Studio.bat`.
+2. Plug in both pedals, click **Scan USB**.
+3. Edit, Audition, click **SYNC ALL TO PEDALS**.
+4. Unplug from the computer and play.
 
 ---
 
-## Troubleshooting & Recovery
+# Device Library (looking at what is on your pedal)
 
-- **Effect shows `DSP FULL` or auto-bypasses on the MS-50G:** Your 6-slot chain exceeds 100% DSP (common when stacking a heavy amp + CAB + heavy reverb like Plate/HD Hall). Swap one effect for a lighter model or disable an unused slot.
-- **Chocolate Plus doesn't trigger MS-50G wirelessly:** Confirm MIDI-B is in **`Host Only`** mode, its LED is **solid**, the OTG Y-cable has 5V power, and the MS-50G has **MIDI Ch = OMNI**, **CC Receive = ON**, **PC Receive = ON**.
-- **WebMIDI doesn't see a pedal:** Make sure you are using **Chrome or Edge** (not Firefox/Safari), close CubeSuite / Zoom Effect Manager (Windows locks USB MIDI ports to one app at a time), and verify your USB cable is a **data** cable.
-- **Recovering to Stock Firmware:** If the modded firmware ever misbehaves and the pedal still enters bootloader mode, hold **UP (`▲`) + DOWN (`▼`)** while plugging in Mini-USB and run Zoom's **official unmodified MS-50G updater** to restore stock firmware. *(Note: this will not recover a hardware-bricked bootloader, so always flash carefully.)*
+Click **Device Library** to see which effects are installed on your pedal.
+- **List installed effect files** shows the effect files on the pedal.
+- **Read all effects (names & knobs) + save .zip** downloads them so the app knows their real names and knobs. This takes a few minutes.
+- **Read all 50 presets** will usually say it cannot. That is normal: this pedal does not let a computer switch patches over USB, so the app can **send** patches but not **read them back**. The app then protects your rigs and does not overwrite them with wrong data. This does not stop syncing.
+
+---
+
+# Troubleshooting (find your problem below)
+
+### "Scan USB" does not find a pedal
+1. Use **Chrome or Edge** only.
+2. Close Zoom Effect Manager, CubeSuite, and any other tab or program using MIDI. Windows lets only one program talk to a pedal at a time.
+3. Try a different **data** USB cable and a different USB port (no hub if possible).
+4. Unplug, wait 5 seconds, plug in, click **Scan USB**.
+
+### Red message: "Chocolate Plus did not confirm … setting(s)"
+The Chocolate Plus stopped answering.
+1. Unplug its USB cable.
+2. Check the side switch is on **U**.
+3. Plug it back in, click **Scan USB**.
+4. Click **Program Chocolate Plus** (not Sync All) and wait for "confirmed every footswitch setting".
+5. Still failing? Close other MIDI programs. If the message ends with "replies from it: 0", the pedal is silent (check cable/switch). Send that whole message to whoever is helping you.
+
+### Footswitch test: a switch stays dark or says "Unexpected"
+Click **Program Chocolate Plus** and test again. If it still fails, do the steps above for the red message.
+
+### The expression pedal does nothing (bar says "not seen yet")
+Check these **in order**:
+1. **Cable:** it must be a **stereo TRS** cable. Try another one.
+2. **Wiring:** the cable goes from the VP-1 **OUTPUT** into the Chocolate Plus **PEDAL** jack. Leave the VP-1 **INPUT** empty.
+3. **Pedal's own switch:** the VP-1 has a mode or polarity switch. Flip it and sweep again.
+4. Click **Program Chocolate Plus** again (this sets the jack to expression mode), then reopen Footswitch Test.
+5. Still nothing, or the bar only moves partway? Tell your helper the "range seen" numbers. It may be the pedal or the jack, not the app.
+
+### Footswitch works but the pedal sound does not change
+1. Click **SYNC ALL TO PEDALS** again and wait for 100%.
+2. On the MS-50G check **MIDI Channel = OMNI (or 1)**, **CC Receive = ON**.
+3. Wireless: MIDI-B must be in **Host Mode**, its light solid, and the Y-cable must have 5V power.
+
+### "Did not confirm saving Patch …" or "0/48 store ACKs" (MS-50G)
+Power the pedal off and on, unplug and replug the USB, click **Scan USB**, then **Sync All** again.
+
+### Crackling, popping, or the screen shows "DSP FULL"
+1. Look at the **DSP meter**. Near or over 100 means too much.
+2. Swap the heaviest effect (the meter names it) for a lighter one. Big reverbs (Plate, HD Hall, Church, ParticleR) and amps are the heaviest. Turning the amp's **CAB** off saves some.
+3. If the meter is low and it still crackles, try these: change delay time only when no note is ringing, turn the output level down a bit (clipping), and try a different power adapter / USB port (noise).
+
+### Audition does nothing or I hear the old sound
+1. Make sure the MS-50G badge is green. Click **Scan USB** if not.
+2. Click **■ Stop audition**, then **🔊 Audition** again.
+3. Audition leaves out the SCENE helper effect on purpose, so you hear one scene by itself. The real scene switching is only heard after **Sync All**.
+
+### "Read all effects" stops partway or says "bad chunk"
+1. Power-cycle the pedal (off and on) and click **Scan USB**.
+2. Try again. The app retries each file and skips ones that fail. Run it a second time to catch the missed ones.
+
+### "Read all 50 presets" says it can't
+This is expected, see "Device Library" above. Your rigs stay safe.
+
+### The pedal shows the wrong sound after a rig change
+Hold **A** or **B** only once and wait a moment. Do not tap other switches during the rig change. If it keeps happening, **Sync All** again.
+
+### Getting back to stock firmware
+If the modified firmware misbehaves and the pedal still starts in update mode: hold **UP + DOWN** while plugging in the Mini-USB, and run Zoom's **official, unmodified MS-50G updater**. This cannot fix a pedal that no longer starts in update mode, so always flash carefully.
 
 ---
 
 ## Credits
-
-- **MIDISTOMP 2.0 Custom Firmware:** Huge thanks to **[matujuice / zoom-ms-midistomp](https://github.com/matujuice/zoom-ms-midistomp)** for the `MIDISTOMP 2.0` unified OS, MIDI CC control architecture, and firmware patcher tooling that makes this project possible.
+Built on **MIDISTOMP 2.0** by [matujuice / zoom-ms-midistomp](https://github.com/matujuice/zoom-ms-midistomp). All core MIDISTOMP firmware work belongs to matujuice.

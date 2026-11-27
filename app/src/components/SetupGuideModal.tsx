@@ -36,7 +36,7 @@ export const SetupGuideModal: React.FC<SetupGuideModalProps> = ({ isOpen, onClos
         </div>
 
         <p className="modal-intro">
-          Follow these 3 one-time steps once. After that, you just dial tones on your Pedalboard,
+          Follow these one-time steps once (the full plain-English guide is in docs/TUTORIAL.md). After that, you just dial tones on your Pedalboard,
           click <strong>SYNC ALL TO PEDALS</strong>, unplug from your PC, and play wirelessly!
         </p>
 
@@ -108,6 +108,30 @@ export const SetupGuideModal: React.FC<SetupGuideModalProps> = ({ isOpen, onClos
                 Incoming USB Pedal Raw Value: <strong>{liveFootCc} / 127</strong>
               </span>
             </div>
+          </div>
+
+          {/* Card 4 */}
+          <div className="guide-card">
+            <div className="guide-step-badge">IF SOMETHING GOES WRONG</div>
+            <h3>Quick Fixes</h3>
+            <ol>
+              <li>
+                <strong>Chocolate Plus did not confirm:</strong> unplug its USB, side switch on <strong>U</strong>,
+                replug, click <em>Scan USB</em>, then <em>Program Chocolate Plus</em>.
+              </li>
+              <li>
+                <strong>Expression pedal does nothing:</strong> use a <strong>stereo TRS</strong> cable (two black
+                rings), VP-1 <code>OUTPUT</code> to the Chocolate Plus <code>PEDAL</code> jack, then check the
+                bar in <em>Footswitch Test</em>.
+              </li>
+              <li>
+                <strong>Crackling:</strong> watch the <strong>DSP meter</strong>. Near 100 means swap the
+                heaviest effect (big reverbs and amps) for a lighter one.
+              </li>
+              <li>
+                <strong>Pedal not found:</strong> use Chrome or Edge, close other MIDI programs, use a data USB cable.
+              </li>
+            </ol>
           </div>
         </div>
       </div>

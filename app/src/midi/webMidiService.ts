@@ -1,3 +1,4 @@
+import { buildZip, decodeChunkReply, DeviceFileEntry, interleaveName, parseFileListReply, plainName } from './zoomFiles';
 import { getEffectDefinition } from '../data/effectCatalog';
 import { GigRig, SceneId, SyncProgress } from '../types/rig';
 import {
@@ -90,10 +91,17 @@ export class WebMidiService {
   private pendingZoomIdentityResolve: (() => void) | null = null;
   /** Incremented on every Chocolate Plus `F0 00 32 01` config ACK. */
   private chocoAckCount: number = 0;
+  private chocoRxCount: number = 0;
+  private chocoLastRx: string = 'none';
   private chocoAckWaiters: Set<() => void> = new Set();
   private chocolateMidiListeners: Set<(data: Uint8Array) => void> = new Set();
   private zoomRxCount: number = 0;
   private lastZoomRxSummary: string = 'none';
+  private rawSniffers: Set<(data: Uint8Array) => void> = new Set();
+  /** Scales the conservative waits used when reading patches (tests set this very low). */
+  public pacing = 1;
+  /** When set, file-protocol requests/replies are recorded here (shown to the user when a download fails). */
+  private fileTrace: string[] | null = null;
 
   constructor(injected?: InjectedPorts | null) {
     this.injected = injected;
@@ -377,6 +385,7 @@ export class WebMidiService {
   }
 
   private handleZoomReply(data: Uint8Array): void {
+    for (const sn of this.rawSniffers) sn(new Uint8Array(data));
     this.zoomRxCount++;
     const head = Array.from(data.slice(0, 10))
       .map((b) => b.toString(16).padStart(2, '0'))
@@ -424,6 +433,8 @@ export class WebMidiService {
   }
 
   private handleChocolateInput(data: Uint8Array): void {
+    this.chocoRxCount++;
+    this.chocoLastRx = `len=${data.length} [${Array.from(data.slice(0, 8)).map((b) => b.toString(16).padStart(2, '0')).join(' ')}]`;
     // M-Vave Chocolate Plus Config ACK: F0 00 32 01 ... F7
     if (
       data.length >= 4 &&
@@ -460,6 +471,41 @@ export class WebMidiService {
       this.zoomOut.send([0xc0, pc]);
     } catch {
       // Ignore transient live-preview drops
+    }
+  }
+
+  /** True while an audition is playing (the pedal is held in editor mode with an unsaved patch in its edit buffer). */
+  public auditioning = false;
+
+  /**
+   * Sends an unsaved patch to the pedal's edit buffer so it can be heard. Never sends the store command, so nothing on
+   * the pedal is overwritten; switching patches on the pedal (or `stopAudition`) returns to the stored sound.
+   */
+  public sendAudition(raw122: Uint8Array): { ok: boolean; message: string } {
+    if (!this.zoomOut) return { ok: false, message: 'Connect your Zoom MS-50G and click Scan USB first.' };
+    try {
+      if (!this.auditioning) {
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+        this.auditioning = true;
+      }
+      this.zoomOut.send(buildPatchWriteSysex(this.zoomModelId, 0, raw122));
+      return { ok: true, message: 'Auditioning: the pedal is playing your unsaved edit.' };
+    } catch (err) {
+      this.auditioning = false;
+      return { ok: false, message: `Audition failed: ${(err as Error).message}` };
+    }
+  }
+
+  public stopAudition(): void {
+    if (!this.zoomOut || !this.auditioning) {
+      this.auditioning = false;
+      return;
+    }
+    this.auditioning = false;
+    try {
+      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+    } catch {
+      // ignore
     }
   }
 
@@ -525,7 +571,7 @@ export class WebMidiService {
     delayMs: number,
     timeoutMs: number,
     verb: string,
-    opts: { settleMs?: number; indices?: number[]; leaveEditorForPc?: boolean } = {}
+    opts: { settleMs?: number; indices?: number[]; leaveEditorForPc?: boolean; label?: (idx: number) => string } = {}
   ): Promise<{ ok: true; raw48: Uint8Array[] } | { ok: false; label: string; error: string }> {
     const zoomOut = this.zoomOut!;
     const raw48: Uint8Array[] = [];
@@ -537,7 +583,7 @@ export class WebMidiService {
     await sleep(delayMs > 0 ? Math.max(delayMs, 80) : 0);
 
     for (const [n, idx] of indices.entries()) {
-      const rigLabel = this.patchLabel(idx);
+      const rigLabel = (opts.label ?? ((i: number) => this.patchLabel(i)))(idx);
       onProgress({
         phase: 'backup',
         current: n + 1,
@@ -545,46 +591,64 @@ export class WebMidiService {
         message: `${verb} ${rigLabel} from Zoom MS-50G...`,
       });
 
-      try {
-        const dumpPromise = new Promise<Uint8Array>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            if (this.pendingZoomDumpResolve) {
-              this.pendingZoomDumpResolve = null;
-              reject(
-                new Error(
-                  `Timed out waiting for MS-50G reply on slot ${idx + 1} [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]`
-                )
-              );
-            }
-          }, timeoutMs);
-          this.pendingZoomDumpResolve = (bytes) => {
-            clearTimeout(timer);
-            resolve(bytes);
-          };
-        });
+      // A patch read occasionally gets no answer (the pedal is busy loading); retry that one patch a couple of times,
+      // slower and always via leave-editor, before giving up on the whole read.
+      const attempts = delayMs > 0 ? 2 : 1;
+      let lastErr: Error | null = null;
+      let got = false;
+      for (let attempt = 0; attempt < attempts && !got; attempt++) {
+        try {
+          const stepOut = Boolean(opts.leaveEditorForPc) || attempt > 0;
+          // Give the pedal plenty of time to finish loading a patch (and to settle after a missed reply) before the
+          // next command: hammering it with back-to-back editor/Program Change messages can hang it.
+          const settle = attempt > 0 ? Math.round((Math.max(settleMs, 700) + 800) * this.pacing) : stepOut ? Math.round(Math.max(settleMs, 700) * this.pacing) : settleMs;
+          if (stepOut) {
+            // Some firmware ignores Program Change while the editor is attached: step out, switch, step back in.
+            zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+            await sleep(60);
+          }
+          zoomOut.send([0xc0, idx]);
+          await sleep(settle);
+          if (stepOut) {
+            zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+            await sleep(stepOut && delayMs > 0 ? 250 : 80);
+          }
+          // Start the reply timeout only now, right before asking, so the settle waits above never eat into it.
+          const dumpPromise = new Promise<Uint8Array>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              if (this.pendingZoomDumpResolve) {
+                this.pendingZoomDumpResolve = null;
+                reject(
+                  new Error(
+                    `Timed out waiting for MS-50G reply on slot ${idx + 1} [model=0x${this.zoomModelId.toString(16)}, rx=${this.zoomRxCount}, last=${this.lastZoomRxSummary}]`
+                  )
+                );
+              }
+            }, timeoutMs);
+            this.pendingZoomDumpResolve = (bytes) => {
+              clearTimeout(timer);
+              resolve(bytes);
+            };
+          });
 
-        if (opts.leaveEditorForPc) {
-          // Some firmware ignores Program Change while the editor is attached: step out, switch, step back in.
-          zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
-          await sleep(60);
-        }
-        zoomOut.send([0xc0, idx]);
-        await sleep(settleMs);
-        if (opts.leaveEditorForPc) {
-          zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
-          await sleep(80);
-        }
-        zoomOut.send(buildPatchRequestSysex(this.zoomModelId));
+          zoomOut.send(buildPatchRequestSysex(this.zoomModelId));
 
-        const sysex146 = await dumpPromise;
-        raw48[idx] = decodePatchReadSysex(sysex146);
-      } catch (err) {
+          const sysex146 = await dumpPromise;
+          raw48[idx] = decodePatchReadSysex(sysex146);
+          got = true;
+        } catch (err) {
+          lastErr = err as Error;
+          this.pendingZoomDumpResolve = null;
+          if (delayMs > 0) await sleep(Math.round(1500 * this.pacing));
+        }
+      }
+      if (!got) {
         try {
           zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
         } catch {
           // ignore
         }
-        return { ok: false, label: rigLabel, error: (err as Error).message };
+        return { ok: false, label: rigLabel, error: (lastErr ?? new Error('unknown error')).message };
       }
     }
 
@@ -596,6 +660,355 @@ export class WebMidiService {
       // Ignore post-read exit-editor / PC return failure
     }
     return { ok: true, raw48 };
+  }
+
+
+  /** Reads all 50 patch slots (the 48 scene records plus the 2 unmanaged slots) into raw 122-byte buffers. */
+  public async readLibrary(
+    onProgress: (p: SyncProgress) => void,
+    delayMs: number = 25,
+    timeoutMs: number = 600
+  ): Promise<{ ok: true; raw50: Uint8Array[] } | { ok: false; userMessage: string }> {
+    if (!this.zoomOut || !this.zoomIn) {
+      return { ok: false, userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB before reading its presets.' };
+    }
+    // The MS-50G ignores Program Change while the editor is attached and needs time to load a patch, so each patch is read
+    // by stepping out of editor mode, switching, and stepping back in (the same method the read-back check needed).
+    const slow = delayMs > 0;
+    const res = await this.readRaw48(onProgress, delayMs, slow ? Math.max(timeoutMs, 1500) : timeoutMs, 'Reading', {
+      indices: Array.from({ length: 50 }, (_, i) => i),
+      label: (i) => `Patch ${String(i + 1).padStart(2, '0')}`,
+      settleMs: slow ? 250 : 0,
+      leaveEditorForPc: slow,
+    });
+    if (!res.ok) {
+      const msg = `Failed reading ${res.label} from MS-50G (${res.error}).`;
+      onProgress({ phase: 'error', current: 0, total: 50, message: msg });
+      return { ok: false, userMessage: msg };
+    }
+    // Many identical names mean the pedal answered with the same patch every time instead of switching patches.
+    const names = res.raw48.map((r) => (r ? unpackRawPatch128(r).name : ''));
+    const counts = new Map<string, number>();
+    for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+    const [topName, topCount] = [...counts.entries()].sort((x, y) => y[1] - x[1])[0] ?? ['', 0];
+    if (topCount >= 10) {
+      const msg = `The MS-50G answered ${topCount} of 50 requests with the same patch ("${topName}") instead of switching patches, so this library is not trustworthy. Power-cycle the pedal, click Scan USB and read again.`;
+      onProgress({ phase: 'error', current: 50, total: 50, message: msg });
+      return { ok: false, userMessage: msg };
+    }
+    onProgress({ phase: 'done', current: 50, total: 50, message: 'Read all 50 presets from the MS-50G.' });
+    return { ok: true, raw50: res.raw48 };
+  }
+
+  /** Writes one raw patch to slot `idx` (0..49) and stores it (waits for the store ACK). */
+  public async writeLibraryPatch(
+    idx: number,
+    raw122: Uint8Array,
+    onProgress: (p: SyncProgress) => void
+  ): Promise<{ ok: boolean; userMessage: string }> {
+    if (!this.zoomOut) return { ok: false, userMessage: 'Connect your Zoom MS-50G and click Scan USB first.' };
+    if (idx < 0 || idx > 49) return { ok: false, userMessage: `Patch slot ${idx + 1} is out of range (1..50).` };
+    const out = this.zoomOut;
+    try {
+      onProgress({ phase: 'ms50g', current: 0, total: 1, message: `Writing Patch ${idx + 1} to MS-50G...` });
+      out.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+      await sleep(80);
+      out.send([0xc0, idx]);
+      await sleep(80);
+      out.send(buildPatchWriteSysex(this.zoomModelId, idx, raw122));
+      await sleep(220);
+      const ack = this.zoomIn ? this.waitForZoomAck(5000) : Promise.resolve(true);
+      out.send(buildPatchStoreSysex(this.zoomModelId, idx));
+      const acked = await ack;
+      await sleep(80);
+      out.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      if (!acked) {
+        const msg = `MS-50G did not confirm saving Patch ${idx + 1}. Click Scan USB and try again.`;
+        onProgress({ phase: 'error', current: 0, total: 1, message: msg });
+        return { ok: false, userMessage: msg };
+      }
+      const msg = `Saved Patch ${idx + 1} to the MS-50G.`;
+      onProgress({ phase: 'done', current: 1, total: 1, message: msg });
+      return { ok: true, userMessage: msg };
+    } catch (err) {
+      return { ok: false, userMessage: `USB write failed: ${(err as Error).message}` };
+    }
+  }
+
+
+
+  /** Sends one frame and resolves with the next message the pedal sends (or null on timeout). */
+  private zoomRequest(body: number[], timeoutMs: number = 1500): Promise<Uint8Array | null> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const hx = (d: ArrayLike<number>, n = 48) =>
+        Array.from(d as ArrayLike<number>).slice(0, n).map((b) => b.toString(16).padStart(2, '0')).join(' ') + (d.length > n ? ' ...' : '');
+      const handler = (d: Uint8Array) => done(d);
+      const done = (d: Uint8Array | null) => {
+        clearTimeout(timer);
+        this.rawSniffers.delete(handler);
+        if (this.fileTrace && this.fileTrace.length < 400) this.fileTrace.push(d ? `   <- len=${d.length} ${hx(d)}` : '   <- (no reply)');
+        resolve(d);
+      };
+      timer = setTimeout(() => done(null), timeoutMs);
+      this.rawSniffers.add(handler);
+      const frame = new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, ...body, 0xf7]);
+      if (this.fileTrace && this.fileTrace.length < 400) this.fileTrace.push(`-> ${hx(frame)}`);
+      this.zoomOut!.send(frame);
+    });
+  }
+
+  private async fileListInner(onProgress: (p: SyncProgress) => void, max: number): Promise<DeviceFileEntry[]> {
+    const files: DeviceFileEntry[] = [];
+    let msg = await this.zoomRequest([0x60, 0x25, 0x00, 0x00, 0x2a, 0x00]);
+    while (msg && files.length < max) {
+      const entry = parseFileListReply(msg);
+      if (!entry) break;
+      files.push(entry);
+      onProgress({ phase: 'ms50g', current: files.length, total: Math.max(files.length, 1), message: `Listing files on the MS-50G... ${files.length} found` });
+      msg = await this.zoomRequest([0x60, 0x26, 0x00, 0x00, 0x2a, 0x00]);
+    }
+    return files;
+  }
+
+  /** Lists every file on the pedal's file system (installed .ZDL effects etc.) with its size. Read-only. */
+  public async listDeviceFiles(
+    onProgress: (p: SyncProgress) => void
+  ): Promise<{ ok: true; files: DeviceFileEntry[] } | { ok: false; userMessage: string }> {
+    if (!this.zoomOut || !this.zoomIn) return { ok: false, userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB first.' };
+    try {
+      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+      await sleep(100);
+      const files = await this.fileListInner(onProgress, 600);
+      if (files.length === 0) return { ok: false, userMessage: 'The MS-50G returned no files.' };
+      onProgress({ phase: 'done', current: files.length, total: files.length, message: `Found ${files.length} files on the MS-50G.` });
+      return { ok: true, files };
+    } catch (err) {
+      return { ok: false, userMessage: `USB error while listing files: ${(err as Error).message}` };
+    } finally {
+      try {
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** Reads the pedal's result of the last file operation (`60 05`). Success is five 00 bytes; errors are 7f-style codes. */
+  private async fileResult(): Promise<{ msg: Uint8Array | null; ok: boolean }> {
+    const msg = await this.zoomRequest([0x60, 0x05, 0x00], 1500);
+    const ok = !!msg && msg.length >= 12 && msg[5] === 0x03 && msg.slice(msg.length - 6, msg.length - 1).every((b) => b === 0);
+    return { msg, ok };
+  }
+
+  /** Downloads one file (editor mode must already be on). Throws on any failure; always closes the file. */
+  private async fileDownloadInner(name: string, expectedSize?: number): Promise<Uint8Array> {
+    // File names: the pedal's own listing shows plain ASCII names, so try the plain C-string form first and fall back to
+    // the character-by-character form used by another Zoom model. The result of the existence check tells which one works
+    // (a wrongly encoded name is read as a one-letter file name and comes back as an error code).
+    const forms = [plainName(name), interleaveName(name)];
+    let nameBytes: number[] | null = null;
+    for (const form of forms) {
+      for (let attempt = 0; attempt < 3 && !nameBytes; attempt++) {
+        await this.zoomRequest([0x60, 0x25, 0x00, 0x00, ...form]);
+        const r = await this.fileResult();
+        // Found = plain "ok" (five zero bytes) OR the pedal answering with the file's directory entry (status 04, cmd 25).
+        const entry = !!r.msg && r.msg[5] === 0x04 && r.msg[6] === 0x25 && r.msg.length > 20;
+        if (r.ok || entry) {
+          nameBytes = form;
+          if (entry) await this.fileResult(); // drain the pending result so the next command starts clean
+        } else if (r.msg && r.msg[5] === 0x03 && r.msg[6] !== 0x00) {
+          break; // definite error code (file not found): try the other name form
+        } else {
+          await sleep(150);
+        }
+      }
+      if (nameBytes) break;
+    }
+    if (!nameBytes) throw new Error('the pedal did not find the file (see log)');
+    await this.zoomRequest([0x60, 0x27]);
+    const blocks: Uint8Array[] = [];
+    try {
+      // Open. The pedal answers with a directory-style reply (status 04, cmd 20) holding the buffer address at bytes 11..15.
+      // An all-zero address means the pedal was still busy (e.g. just closed the previous file): close, wait and retry.
+      let open: Uint8Array | null = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const first = await this.zoomRequest([0x60, 0x20, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...nameBytes]);
+        if (!first) throw new Error('no answer to open');
+        const opened = await this.fileResult();
+        const m = opened.msg;
+        const isOpenReply = !!m && m[5] === 0x04 && m[6] === 0x20 && m.length >= 17;
+        if (isOpenReply && m!.slice(11, 16).some((x) => x !== 0)) {
+          open = m;
+          break;
+        }
+        if (!isOpenReply && opened.ok) {
+          open = first;
+          break;
+        }
+        await this.zoomRequest([0x60, 0x21, 0x40, 0x00, 0x00, 0x00, 0x00], 800);
+        await this.zoomRequest([0x60, 0x09], 800);
+        await sleep(400 * (attempt + 1));
+      }
+      if (!open) throw new Error('the pedal could not open the file (see log)');
+      const tail = [0x00, 0x04, 0x00, 0x00, 0x00];
+      const strategies: number[][] = [];
+      if (open.length >= 17) strategies.push([...Array.from(open.slice(11, 16)), ...tail]);
+      strategies.push([0x14, 0x2f, 0x60, 0x00, 0x0c, ...tail]);
+      let strategy = -1;
+      for (let n = 0; n < 4000; n++) {
+        let res: ReturnType<typeof decodeChunkReply> | null = null;
+        const candidates = strategy >= 0 ? [strategy] : strategies.map((_, i) => i);
+        for (const si of candidates) {
+          await this.zoomRequest([0x60, 0x22, ...strategies[si]]);
+          // The data may not be ready at the first poll (the pedal then answers with a short status message): poll again.
+          let msg = (await this.fileResult()).msg;
+          for (let poll = 0; poll < 6 && (!msg || msg.length < 16 || msg[4] !== 0x60); poll++) {
+            await sleep(80);
+            msg = (await this.fileResult()).msg;
+          }
+          if (!msg) throw new Error('no answer while reading');
+          const r = decodeChunkReply(msg);
+          if (r.kind === 'error') {
+            this.fileTrace?.push(`   !! unreadable chunk (${r.reason}) len=${msg.length} ${Array.from(msg.slice(0, 24), (b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+          }
+          if (r.kind === 'data') {
+            strategy = si;
+            res = r;
+            break;
+          }
+          if (n > 0 || blocks.length > 0) {
+            res = r;
+            break;
+          }
+          res = r; // first chunk failed: try the next strategy
+        }
+        if (!res) throw new Error('no chunk reply');
+        if (res.kind === 'end') {
+          if (blocks.length === 0) throw new Error('the pedal refused every read request (see log)');
+          break;
+        }
+        if (res.kind === 'error') throw new Error(`bad chunk (${res.reason})`);
+        blocks.push(res.block);
+      }
+    } finally {
+      try {
+        await this.zoomRequest([0x60, 0x21, 0x40, 0x00, 0x00, 0x00, 0x00], 800);
+        await this.zoomRequest([0x60, 0x09], 800);
+        await sleep(250);
+      } catch {
+        // ignore
+      }
+    }
+    const total = blocks.reduce((n, b) => n + b.length, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const b of blocks) {
+      out.set(b, o);
+      o += b.length;
+    }
+    if (total === 0) throw new Error('file was empty');
+    if (expectedSize !== undefined && total !== expectedSize) throw new Error(`got ${total} bytes, expected ${expectedSize}`);
+    return out;
+  }
+
+  /** Downloads one file from the pedal. Read-only. */
+  public async downloadDeviceFile(
+    name: string,
+    onProgress: (p: SyncProgress) => void,
+    expectedSize?: number
+  ): Promise<{ ok: true; data: Uint8Array } | { ok: false; userMessage: string; trace?: string }> {
+    if (!this.zoomOut || !this.zoomIn) return { ok: false, userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB first.' };
+    this.fileTrace = [`Download of ${name} (expected ${expectedSize ?? '?'} bytes)  ${new Date().toISOString()}`];
+    try {
+      onProgress({ phase: 'ms50g', current: 0, total: 1, message: `Downloading ${name} from the MS-50G...` });
+      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+      await sleep(100);
+      const data = await this.fileDownloadInner(name, expectedSize);
+      onProgress({ phase: 'done', current: 1, total: 1, message: `Downloaded ${name} (${data.length} bytes).` });
+      return { ok: true, data };
+    } catch (err) {
+      const msg = `Could not download ${name}: ${(err as Error).message}`;
+      onProgress({ phase: 'error', current: 0, total: 1, message: msg });
+      return { ok: false, userMessage: msg, trace: (this.fileTrace ?? []).join('\n') };
+    } finally {
+      this.fileTrace = null;
+      try {
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** Downloads every listed file one at a time and packs them into a zip. Stops at the first failure. */
+  public async downloadAllDeviceFiles(
+    files: DeviceFileEntry[],
+    onProgress: (p: SyncProgress) => void,
+    _returnFiles: boolean = false
+  ): Promise<
+    | { ok: true; zip: Uint8Array; files: Array<{ name: string; data: Uint8Array }>; failed: string[]; trace: string }
+    | { ok: false; userMessage: string; partial?: number; trace?: string }
+  > {
+    if (!this.zoomOut || !this.zoomIn) return { ok: false, userMessage: 'Connect your Zoom MS-50G over USB and click Scan USB first.' };
+    this.fileTrace = ['Download all files  ' + new Date().toISOString()];
+    const got: Array<{ name: string; data: Uint8Array }> = [];
+    const failed: string[] = [];
+    const failTrace: string[] = [];
+    let consecutive = 0;
+    try {
+      this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+      await sleep(100);
+      for (const [i, f] of files.entries()) {
+        onProgress({ phase: 'ms50g', current: i + 1, total: files.length, message: `Downloading ${f.name} (${i + 1}/${files.length})...` });
+        let lastErr = '';
+        let done = false;
+        for (let attempt = 0; attempt < 3 && !done; attempt++) {
+          try {
+            const data = await this.fileDownloadInner(f.name, f.size);
+            got.push({ name: f.name, data });
+            done = true;
+          } catch (err) {
+            lastErr = (err as Error).message;
+            this.fileTrace?.push(`   !! ${f.name} attempt ${attempt + 1} failed: ${lastErr}`);
+            if (failTrace.length < 3) failTrace.push((this.fileTrace ?? []).slice(-70).join('\n'));
+            // Reset the pedal's editor session before trying again, in case a half-finished transfer left it confused.
+            try {
+              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+              await sleep(600);
+              this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x50, 0xf7]));
+            } catch {
+              // ignore
+            }
+            await sleep(1000 * (attempt + 1));
+          }
+        }
+        if (!done) {
+          failed.push(`${f.name} (${lastErr})`);
+          consecutive++;
+          if (consecutive >= 3) {
+            failed.push(`stopped early: ${files.length - i - 1} more files not tried because 3 files in a row failed (power-cycle the pedal and try again)`);
+            break;
+          }
+        } else consecutive = 0;
+        await sleep(200);
+      }
+      onProgress({ phase: 'done', current: files.length, total: files.length, message: `Downloaded ${files.length} files.` });
+      if (got.length === 0) throw new Error(`no file could be downloaded: ${failed.join('; ')}`);
+      return { ok: true, zip: buildZip(got), files: got, failed, trace: failTrace.join('\n\n----\n\n') };
+    } catch (err) {
+      const failed = files[got.length]?.name ?? '?';
+      const msg = `Stopped at ${failed} after ${got.length} of ${files.length} files: ${(err as Error).message}`;
+      onProgress({ phase: 'error', current: got.length, total: files.length, message: msg });
+      return { ok: false, userMessage: msg, partial: got.length, trace: (this.fileTrace ?? []).slice(-120).join('\n') };
+    } finally {
+      this.fileTrace = null;
+      try {
+        this.zoomOut.send(new Uint8Array([0xf0, 0x52, 0x00, this.zoomModelId, 0x51, 0xf7]));
+      } catch {
+        // ignore
+      }
+    }
   }
 
   /**
@@ -614,7 +1027,11 @@ export class WebMidiService {
       };
     }
 
-    const res = await this.readRaw48(onProgress, delayMs, timeoutMs, 'Reading');
+    const slowRead = delayMs > 0;
+    const res = await this.readRaw48(onProgress, delayMs, slowRead ? Math.max(timeoutMs, Math.round(1500 * this.pacing)) : timeoutMs, 'Reading', {
+      settleMs: slowRead ? 250 : 0,
+      leaveEditorForPc: slowRead,
+    });
     if (!res.ok) {
       onProgress({
         phase: 'error',
@@ -626,6 +1043,20 @@ export class WebMidiService {
         ok: false,
         userMessage: `Could not read ${res.label} from MS-50G (${res.error}).`,
       };
+    }
+
+    // Never turn a stuck read into rigs: if the pedal answered many requests with the same patch it did not switch
+    // patches, and loading that into the editor would overwrite every rig with copies of one patch.
+    {
+      const nm = res.raw48.map((r) => (r ? unpackRawPatch128(r).name : ''));
+      const cnt = new Map<string, number>();
+      for (const n of nm) cnt.set(n, (cnt.get(n) ?? 0) + 1);
+      const [topName, topCount] = [...cnt.entries()].sort((x, y) => y[1] - x[1])[0] ?? ['', 0];
+      if (topCount >= 10) {
+        const msg = `The MS-50G answered ${topCount} of 48 requests with the same patch ("${topName}") instead of switching patches, so nothing was loaded and your rigs are unchanged. Power-cycle the pedal, click Scan USB and try again.`;
+        onProgress({ phase: 'error', current: 48, total: 48, message: msg });
+        return { ok: false, userMessage: msg };
+      }
     }
 
     const rigs = decompile48PatchesToRigs(res.raw48);
@@ -812,7 +1243,7 @@ export class WebMidiService {
     }
 
     if (failed.length > 0) {
-      const msg = `Chocolate Plus did not confirm ${failed.length} setting(s): ${failed.slice(0, 6).join(', ')}${failed.length > 6 ? ' …' : ''}. Unplug and replug its USB (side switch on U), click Scan USB, then click Program Chocolate Plus.`;
+      const msg = `Chocolate Plus did not confirm ${failed.length} setting(s): ${failed.slice(0, 6).join(', ')}${failed.length > 6 ? ' …' : ''}. Unplug and replug its USB (side switch on U), click Scan USB, then click Program Chocolate Plus. [replies from it: ${this.chocoRxCount}, ACKs: ${this.chocoAckCount}, last: ${this.chocoLastRx}]`;
       onProgress({ phase: 'error', current: step, total: totalSteps, message: msg });
       return { ok: false, userMessage: msg, failed };
     }

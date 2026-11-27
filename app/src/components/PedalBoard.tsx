@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   CATEGORY_META,
-  EFFECT_CATALOG,
+  listEffects,
   getAvailableCabs,
   getEffectDefinition,
   isGuitarAmpFxid,
@@ -98,7 +98,7 @@ export const PedalBoard: React.FC = () => {
               )}
               {CATEGORY_ORDER.map((cat) => (
                 <optgroup key={cat} label={CATEGORY_META[cat].label}>
-                  {EFFECT_CATALOG.filter((fx) => fx.category === cat).map((fx) => (
+                  {listEffects({ alsoInclude: slot.fxid }).filter((fx) => fx.category === cat).map((fx) => (
                     <option key={fx.fxid} value={fx.fxid}>
                       {fx.name}
                     </option>

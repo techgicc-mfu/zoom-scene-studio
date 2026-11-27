@@ -29,13 +29,22 @@ export const FootswitchTester: React.FC<FootswitchTesterProps> = ({
   const [log, setLog] = useState<LogEntry[]>([]);
   const [seen, setSeen] = useState<Record<number, boolean>>({});
   const [flash, setFlash] = useState<number | null>(null);
+  const [expr, setExpr] = useState<number | null>(null);
+  const [exprMin, setExprMin] = useState(127);
+  const [exprMax, setExprMax] = useState(0);
 
   useEffect(() => {
     if (!isOpen) return;
     let nextId = 0;
     const unsub = webMidiService.onChocolateMidi((data) => {
       const info = describeFootswitchMessage(data[0], data[1] ?? 0, data[2] ?? 0);
-      if (data[1] === 16 && (data[0] & 0xf0) === 0xb0) return; // expression sweeps are noisy
+      if ((data[0] & 0xf0) === 0xb0 && (data[1] === 16 || data[1] === 11)) {
+        const v = data[2] ?? 0; // expression pedal: shown as a live bar, not logged (sweeps are noisy)
+        setExpr(v);
+        setExprMin((m) => Math.min(m, v));
+        setExprMax((m) => Math.max(m, v));
+        return;
+      }
       setLog((prev) => [{ id: nextId++, label: info.label, expected: info.expected }, ...prev].slice(0, 12));
       if (info.switchIndex !== null && info.expected) {
         const sw = info.switchIndex;
@@ -86,6 +95,21 @@ export const FootswitchTester: React.FC<FootswitchTesterProps> = ({
               <div style={{ fontSize: 11, fontWeight: 400 }}>{seen[i] ? 'OK' : 'not seen yet'}</div>
             </div>
           ))}
+        </div>
+        <div data-testid="fs-expr" style={{ margin: '4px 0 14px' }}>
+          <div style={{ fontSize: 13, marginBottom: 4 }}>
+            Expression pedal (move it heel to toe):{' '}
+            <b>{expr === null ? 'not seen yet' : `${expr} / 127`}</b>
+            {expr !== null && (
+              <span style={{ color: exprMax - exprMin > 100 ? '#3fb950' : '#f0883e' }}>
+                {' '}· range seen {exprMin}–{exprMax}
+                {exprMax - exprMin > 100 ? ' ✓ full sweep' : ' (keep sweeping to the ends)'}
+              </span>
+            )}
+          </div>
+          <div style={{ height: 12, borderRadius: 6, background: '#2a2f3a', overflow: 'hidden' }}>
+            <div style={{ width: `${((expr ?? 0) / 127) * 100}%`, height: '100%', background: '#3fb950' }} />
+          </div>
         </div>
         <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontFamily: 'monospace', fontSize: 13 }}>
           {log.length === 0 && <li style={{ color: '#888' }}>Waiting for a footswitch press…</li>}

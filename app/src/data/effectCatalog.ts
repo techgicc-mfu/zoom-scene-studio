@@ -1,4 +1,5 @@
 import { EffectCategory, EffectDefinition } from '../types/rig';
+import { INSTALLED_EFFECTS } from './installedEffects';
 
 export const SCENE_ZDL_FXID = 0x0195;       // 405 — .ZDL container fxid
 export const SCENE_ZDL_PATCH_ID = 0x02000195; // 28-bit MSOG patch slot ID (Filter gid 0x02 + 0x0195)
@@ -725,8 +726,83 @@ export const EFFECT_BY_ID: Map<number, EffectDefinition> = new Map(
   EFFECT_CATALOG.map((fx) => [fx.fxid, fx])
 );
 
+// ---- Effects installed on the pedal (read from its .ZDL files) ----------------------------------------------------------
+// The curated catalog above has nicer descriptions; every other effect found on the pedal gets a definition generated from
+// its own .ZDL file (real name, knob names, ranges, defaults). Different pedals/firmwares can have different effects, so the
+// list the user sees follows what was actually read from their device once they have scanned it.
+const DYNAMIC_BY_ID = new Map<number, EffectDefinition>();
+let deviceFxids: Set<number> | null = null;
+
+export interface InstalledEffectInput {
+  fxid: number;
+  name: string;
+  params: Array<{ name: string; max: number; defaultValue: number }>;
+}
+
+const NOT_EDITABLE_EFFECTS = new Set<number>([SCENE_ZDL_PATCH_ID]);
+
+function categoryFor(fxid: number, name: string): EffectCategory | null {
+  const gid = (fxid >>> 24) & 0x0f;
+  if (/^(AutoWah|Cry|MonoPitch|PitchSHFT|PedalCry|PedalWah|WAH100)$/i.test(name) || gid === 0x0b) return 'pedal';
+  switch (gid) {
+    case 0x01:
+    case 0x02:
+      return 'comp';
+    case 0x03:
+      return 'drive';
+    case 0x04:
+      return 'amp';
+    case 0x06:
+      return 'mod';
+    case 0x08:
+      return 'delay';
+    case 0x09:
+      return 'reverb';
+    default:
+      return null;
+  }
+}
+
+/** Registers (or refreshes) effects discovered on the pedal. Catalog entries always win. */
+export function registerInstalledEffects(list: InstalledEffectInput[]): void {
+  for (const e of list) {
+    if (EFFECT_BY_ID.has(e.fxid) || NOT_EDITABLE_EFFECTS.has(e.fxid)) continue;
+    const category = categoryFor(e.fxid, e.name);
+    if (!category || e.params.length === 0) continue;
+    const params = e.params.slice(0, 9).map((p) => ({ name: p.name, min: 0, max: p.max, defaultValue: p.defaultValue }));
+    if (category === 'amp') {
+      // Guitar amps: knob 8 is the cabinet (P7) and knob 9 the output routing; the .ZDL stores them without a usable range.
+      while (params.length < 7) params.push({ name: `Knob ${params.length + 1}`, min: 0, max: 100, defaultValue: 0 });
+      params.length = 7;
+      params.push({ name: 'CAB', min: 0, max: 1, defaultValue: 1 }, { name: 'OUT', min: 0, max: 4, defaultValue: 0 });
+    }
+    DYNAMIC_BY_ID.set(e.fxid, {
+      fxid: e.fxid,
+      name: e.name,
+      shortName: e.name,
+      category,
+      description: 'Installed on your MS-50G (knobs read from its own effect file).',
+      params,
+    });
+  }
+}
+
+/** After scanning a pedal: only effects installed on it are offered. `null` = not scanned yet (offer everything known). */
+export function setDeviceEffectIds(ids: number[] | null): void {
+  deviceFxids = ids ? new Set(ids) : null;
+}
+
+registerInstalledEffects(INSTALLED_EFFECTS.map((e) => ({ fxid: e.fxid, name: e.name, params: e.params.map((p) => ({ name: p.name, max: p.max, defaultValue: p.def })) })));
+
 export function getEffectDefinition(fxid: number): EffectDefinition | undefined {
-  return EFFECT_BY_ID.get(fxid);
+  return EFFECT_BY_ID.get(fxid) ?? DYNAMIC_BY_ID.get(fxid);
+}
+
+/** Every effect the editor can offer, optionally restricted to what is installed on the scanned pedal. */
+export function listEffects(opts?: { alsoInclude?: number }): EffectDefinition[] {
+  const all = [...EFFECT_CATALOG, ...DYNAMIC_BY_ID.values()];
+  const visible = all.filter((fx) => !deviceFxids || deviceFxids.has(fx.fxid) || fx.fxid === opts?.alsoInclude);
+  return visible.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ---- Guitar-amp cabinets ---------------------------------------------------------------------------------------------
@@ -748,7 +824,7 @@ export function cabIdForAmp(ampFxid: number): number {
 }
 
 export function getAvailableCabs(): CabOption[] {
-  return EFFECT_CATALOG.filter((fx) => fx.category === 'amp').map((fx) => ({
+  return listEffects().filter((fx) => fx.category === 'amp').map((fx) => ({
     id: cabIdForAmp(fx.fxid),
     name: `${fx.shortName} cab`,
   }));

@@ -5,6 +5,7 @@ import {
   GigRig,
   PedalChain5,
   PedalSlotState,
+  SceneId,
   Vp1CurveType,
 } from '../types/rig';
 
@@ -295,6 +296,16 @@ export function buildPatchStoreSysex(modelId: 0x58 | 0x61, patchIndex: number): 
   ]);
 }
 
+/**
+ * Audition patch: the scene's five effects as a plain patch (slot 1 left empty) so the pedal plays it exactly as edited.
+ * The Scene Studio engine slot is deliberately left out: it would overwrite on/off and knobs from the last synced records.
+ * Scene trim is therefore not part of an audition.
+ */
+export function compileScenePreviewPatch(rig: GigRig, scene: SceneId): Uint8Array {
+  const empty: PedalSlotState = { enabled: false, fxid: 0, params: [0, 0, 0, 0, 0, 0, 0, 0, 0] };
+  return packRawPatch128([empty, ...rig.scenes[scene]], 'Audition', rig.tempo);
+}
+
 function makeSceneSlot0(p1: number, p2: number, trim: number): PedalSlotState {
   return {
     enabled: true,
@@ -373,6 +384,64 @@ export function compileRigsTo48Patches(rigs: GigRig[]): Uint8Array[] {
   return patches;
 }
 
+
+// ---- Lossless in-place editing of a raw 122-byte patch (Device Library) ------------------------------------------------
+/** Bit layout of one 18-byte slot, as (startBitInReversedSlot, width) pairs: enabled, then P0..P8. Mirrors packRawPatch128. */
+const SLOT_PARAM_BITS: ReadonlyArray<readonly [number, number]> = (() => {
+  const out: Array<readonly [number, number]> = [];
+  let bitpos = 143 - 1 - 28;
+  for (let p = 0; p < 3; p++) { out.push([bitpos, 13]); bitpos -= 13; }
+  for (let p = 3; p < 7; p++) { out.push([bitpos, 8]); bitpos -= 8; }
+  out.push([bitpos, 9]); // P7 (9 bits; cab id on guitar amps)
+  bitpos -= 28;
+  out.push([bitpos, 8]); // P8
+  return out;
+})();
+
+export interface RawSlotEdit {
+  enabled?: boolean;
+  /** knob index 0..8 -> new value */
+  params?: Record<number, number>;
+}
+
+/**
+ * Returns a copy of `raw122` with one slot's on/off state and/or knob values changed. Every other bit (unknown effects,
+ * tempo, reserved bytes) is left exactly as it was read from the device, so library edits never corrupt effects the app
+ * does not know.
+ */
+export function editRawSlot(raw122: Uint8Array, slot: number, edit: RawSlotEdit): Uint8Array {
+  if (raw122.length < RAW_PATCH_BYTES) throw new Error(`Expected >= ${RAW_PATCH_BYTES} bytes`);
+  if (slot < 0 || slot > 5) throw new Error(`Slot must be 0..5, got ${slot}`);
+  const out = new Uint8Array(raw122);
+  const rev = out.slice(slot * 18, slot * 18 + 18).reverse();
+  if (edit.enabled !== undefined) setBitsFromNumber(rev, 143, 143, edit.enabled ? 1 : 0);
+  const fxid = getNumberFromBits(rev, 142 - 27, 142);
+  const isGuitarAmp = ((fxid >>> 24) & 0x0f) === 0x04;
+  for (const [k, v] of Object.entries(edit.params ?? {})) {
+    const i = Number(k);
+    const spec = SLOT_PARAM_BITS[i];
+    if (!spec) throw new Error(`Knob index must be 0..8, got ${k}`);
+    const [start, width] = spec;
+    const max = (1 << width) - 1;
+    const val = Math.max(0, Math.min(max, Math.trunc(v)));
+    setBitsFromNumber(rev, start - (width - 1), start, val);
+    if (i === 7 && isGuitarAmp) rev[2] = val > 0 ? 0x40 : 0x00;
+  }
+  out.set(rev.reverse(), slot * 18);
+  return out;
+}
+
+/** Returns a copy of `raw122` with the 10-character patch name replaced (other bytes untouched). */
+export function setRawPatchName(raw122: Uint8Array, name: string): Uint8Array {
+  const out = new Uint8Array(raw122);
+  const clean = name.slice(0, 10).padEnd(10, ' ');
+  for (let i = 0; i < 10; i++) {
+    const c = clean.charCodeAt(i);
+    out[111 + i] = c >= 0x20 && c <= 0x7e ? c : 0x20;
+  }
+  return out;
+}
+
 export function isSceneSlotFxid(fxid: number): boolean {
   return fxid === SCENE_ZDL_PATCH_ID || fxid === SCENE_ZDL_FXID;
 }
@@ -407,7 +476,7 @@ export function decompile48PatchesToRigs(patches48: Uint8Array[]): GigRig[] {
           : { targetSlot: 0, targetParam: 1, minPct: 0, maxPct: 100, curve: 'vp1' };
     }
 
-    const fallback = STARTER_TEMPLATES[r % STARTER_TEMPLATES.length].createRig(r);
+    const fallback = STARTER_TEMPLATES[r % 4].createRig(r);
     rigs.push({
       index: r,
       name: pA.name || fallback.name,

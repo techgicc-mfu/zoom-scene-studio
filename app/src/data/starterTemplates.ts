@@ -239,10 +239,178 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
       };
     },
   },
+  {
+    id: 'modern-metal-tight',
+    title: 'Modern Metal',
+    genreTag: 'Metal & Hard Rock',
+    summary: 'ZNR Gate + TS boost into a HW Stack high-gain stack, tight Digital Delay & Studio Plate.',
+    createRig: (index: number): GigRig => {
+      const sceneA: PedalChain5 = [
+        slot(true, 0x01000050, [12, 1, 100]),                          // ZNR gate (tames high-gain hiss)
+        slot(false, 0x03000170, [22, 62, 92]),                         // TS Drive as a tight boost (OFF on rhythm A)
+        slot(true, 0x040000b0, [62, 30, 100, 48, 38, 54, 55, 1, 0]),   // HW Stack (CAB ON, LINE)
+        slot(false, 0x08000008, [420, 24, 20, 6, 0, 100, 0]),          // Digital Delay
+        slot(true, 0x09000090, [8, 25, 14, 58, 97, 95, 0, 100]),       // Studio Plate (short)
+      ];
+      const sceneB = cloneChain(sceneA);
+      sceneB[1].enabled = true; // Boost ON: tight chugs
+      sceneB[2].params[0] = 70;
+      sceneB[2].params[5] = 58; // more low end
+
+      const sceneC = cloneChain(sceneB);
+      sceneC[1].params[0] = 40; // Lead boost
+      sceneC[2].params[0] = 78;
+      sceneC[2].params[2] = 106; // Level lift
+      sceneC[3].enabled = true;
+      sceneC[3].params[2] = 28;
+
+      const sceneD = cloneChain(sceneA);
+      sceneD[0].enabled = false; // Clean intro: gate off
+      sceneD[2].params[0] = 20;
+      sceneD[2].params[2] = 96;
+      sceneD[3].enabled = true;
+      sceneD[3].params[1] = 40;
+      sceneD[3].params[2] = 34;
+      sceneD[4].params[1] = 48;
+      sceneD[4].params[2] = 30;
+
+      return {
+        index,
+        name: `Metal ${index + 1}`,
+        tempo: 140,
+        sceneNames: { A: 'Tight Rhythm', B: 'Chug Boost', C: 'Lead', D: 'Clean Intro' },
+        sceneTrims: { A: 12, B: 12, C: 16, D: 12 },
+        scenes: { A: sceneA, B: sceneB, C: sceneC, D: sceneD },
+        expression: { targetSlot: 5, targetParam: 3, minPct: 10, maxPct: 60, curve: 'vp1' }, // Delay Mix
+      };
+    },
+  },
+  {
+    id: 'country-twang',
+    title: 'Country Twang',
+    genreTag: 'Country & Americana',
+    summary: 'Dyna Comp squeeze + Centaur push into a Fender Twin, slapback Analog Delay & 63 Spring.',
+    createRig: (index: number): GigRig => {
+      const sceneA: PedalChain5 = [
+        slot(true, 0x01000008, [8, 6, 110, 0]),                        // Dyna Comp
+        slot(false, 0x03000150, [40, 56, 50]),                         // Centaur Gold (OFF on clean A)
+        slot(true, 0x04000008, [28, 30, 95, 62, 40, 40, 58, 1, 0]),    // FD Combo (bright Twin, CAB ON)
+        slot(true, 0x08000030, [120, 14, 28, 8, 0, 100, 0]),           // Analog Delay as slapback
+        slot(true, 0x090000c0, [40, 40, 62, 100]),                     // 63 Spring
+      ];
+      const sceneB = cloneChain(sceneA);
+      sceneB[1].enabled = true; // Centaur ON: rhythm push
+      sceneB[1].params[0] = 48;
+
+      const sceneC = cloneChain(sceneB);
+      sceneC[1].params[0] = 62; // Lead
+      sceneC[2].params[0] = 36;
+      sceneC[3].params[1] = 24;
+      sceneC[3].params[2] = 34;
+
+      const sceneD = cloneChain(sceneA);
+      sceneD[0].params[0] = 5; // Ballad: softer comp, longer echo, more spring
+      sceneD[3].params[0] = 380;
+      sceneD[3].params[1] = 30;
+      sceneD[3].params[2] = 30;
+      sceneD[4].params[1] = 56;
+
+      return {
+        index,
+        name: `Country ${index + 1}`,
+        tempo: 110,
+        sceneNames: { A: 'Clean Chicken', B: 'Push Rhythm', C: 'Twang Lead', D: 'Slow Ballad' },
+        sceneTrims: { A: 12, B: 12, C: 15, D: 12 },
+        scenes: { A: sceneA, B: sceneB, C: sceneC, D: sceneD },
+        expression: { targetSlot: 6, targetParam: 2, minPct: 20, maxPct: 80, curve: 'vp1' }, // Spring mixer
+      };
+    },
+  },
+  {
+    id: 'indie-shimmer-wash',
+    title: 'Indie & Post-Rock',
+    genreTag: 'Indie, Alt & Post-Rock',
+    summary: 'Stereo Chorus + NYC Muff fuzz into a Deluxe-R, Tape Echo trails & Shimmer Reverb swells.',
+    createRig: (index: number): GigRig => {
+      const sceneA: PedalChain5 = [
+        slot(true, 0x060000a0, [40, 18, 45, 7, 100]),                  // Stereo Chorus
+        slot(false, 0x03000160, [52, 55, 62]),                         // NYC Muff fuzz (OFF on A)
+        slot(true, 0x04000010, [40, 30, 100, 52, 46, 46, 52, 1, 0]),   // Deluxe-R (CAB ON)
+        slot(true, 0x08000010, [480, 48, 34, 5, 100, 0]),              // Tape Echo
+        slot(true, 0x09000180, [39, 72, 30, 50, 74, 0]),               // Shimmer Reverb
+      ];
+      const sceneB = cloneChain(sceneA);
+      sceneB[1].enabled = true; // Fuzz ON
+      sceneB[0].enabled = false;
+
+      const sceneC = cloneChain(sceneB);
+      sceneC[1].params[2] = 78; // Fuzz sustain: big lead
+      sceneC[3].params[2] = 44;
+      sceneC[4].params[2] = 36;
+
+      const sceneD = cloneChain(sceneA);
+      sceneD[3].params[1] = 62; // Ambient swell
+      sceneD[3].params[2] = 46;
+      sceneD[4].params[1] = 90;
+      sceneD[4].params[2] = 62;
+
+      return {
+        index,
+        name: `Indie ${index + 1}`,
+        tempo: 100,
+        sceneNames: { A: 'Chorus Clean', B: 'Fuzz Verse', C: 'Big Lead', D: 'Shimmer Swell' },
+        sceneTrims: { A: 12, B: 12, C: 15, D: 13 },
+        scenes: { A: sceneA, B: sceneB, C: sceneC, D: sceneD },
+        expression: { targetSlot: 6, targetParam: 3, minPct: 15, maxPct: 75, curve: 'swell' }, // Shimmer mix
+      };
+    },
+  },
+  {
+    id: 'jazz-neo-soul-clean',
+    title: 'Jazz & Neo-Soul',
+    genreTag: 'Jazz, Neo-Soul & Smooth Clean',
+    summary: 'Gentle Comp + CE-1 Chorus into a warm Twin, light Digital Delay & HD Hall.',
+    createRig: (index: number): GigRig => {
+      const sceneA: PedalChain5 = [
+        slot(true, 0x01000008, [4, 5, 100, 0]),                        // Dyna Comp (light)
+        slot(false, 0x06000090, [2, 20, 34, 100]),                     // Vintage CE-1 Chorus (OFF on A)
+        slot(true, 0x04000008, [18, 30, 92, 36, 52, 56, 38, 1, 0]),    // FD Combo, dark & warm (CAB ON)
+        slot(true, 0x08000008, [320, 16, 14, 6, 0, 100, 0]),           // Digital Delay (subtle)
+        slot(true, 0x09000008, [40, 30, 22, 40, 55, 0]),               // HD Hall (small)
+      ];
+      const sceneB = cloneChain(sceneA);
+      sceneB[1].enabled = true; // Chorus shimmer for chords
+
+      const sceneC = cloneChain(sceneA);
+      sceneC[2].params[0] = 30; // Soloing: a touch more gain and level, echo up
+      sceneC[2].params[2] = 100;
+      sceneC[3].params[2] = 24;
+      sceneC[4].params[2] = 26;
+
+      const sceneD = cloneChain(sceneB);
+      sceneD[3].params[1] = 28; // Ballad: bigger room
+      sceneD[3].params[2] = 22;
+      sceneD[4].params[1] = 48;
+      sceneD[4].params[2] = 34;
+
+      return {
+        index,
+        name: `Jazz ${index + 1}`,
+        tempo: 90,
+        sceneNames: { A: 'Warm Comping', B: 'Chorus Chords', C: 'Solo', D: 'Ballad' },
+        sceneTrims: { A: 12, B: 12, C: 14, D: 12 },
+        scenes: { A: sceneA, B: sceneB, C: sceneC, D: sceneD },
+        expression: { targetSlot: 6, targetParam: 3, minPct: 15, maxPct: 55, curve: 'linear' }, // Hall mix
+      };
+    },
+  },
 ];
+
+/** The four original templates: used to fill a brand-new set of 12 rigs. Newer genre templates are load-on-demand only. */
+const DEFAULT_RIG_TEMPLATES = STARTER_TEMPLATES.slice(0, 4);
 
 export function createDefault12Rigs(): GigRig[] {
   return Array.from({ length: 12 }, (_, idx) =>
-    STARTER_TEMPLATES[idx % STARTER_TEMPLATES.length].createRig(idx)
+    DEFAULT_RIG_TEMPLATES[idx % DEFAULT_RIG_TEMPLATES.length].createRig(idx)
   );
 }
